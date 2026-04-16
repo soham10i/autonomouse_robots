@@ -1,0 +1,5 @@
+{
+    "python.analysis.extraPaths": [
+        "/Applications/Webots.app/Contents/lib/controller/python"
+    ]
+}

@@ -9,8 +9,8 @@ EXTERNPROTO "https://raw.githubusercontent.com/cyberbotics/webots/R2025a/project
 WorldInfo {
 }
 Viewpoint {
-  orientation -0.5773502691896258 0.5773502691896258 0.5773502691896258 2.0944
-  position 0 0 9.989337359783383
+  orientation -0.42154904296934276 0.60909591402257 0.6717875943277318 1.6005720794571783
+  position -1.1254761665647726 -2.833217668140084 9.44915839368227
 }
 TexturedBackground {
   texture "empty_office"
@@ -23,6 +23,7 @@ TexturedBackground {
 Rosbot {
   translation -0.828208 0.81297 0.01
   rotation 0 0 -1 1.43732e-06
+  controller "maze_navigator"
 }
 Solid {
   translation 0.130016 1.25 0.18

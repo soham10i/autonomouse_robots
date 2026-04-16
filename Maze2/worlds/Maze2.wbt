@@ -23,6 +23,7 @@ TexturedBackground {
 Rosbot {
   translation -0.869427 0.587853 0.01
   rotation 0 0 1 1.8326
+  controller "maze_navigator"
 }
 Solid {
   translation 1.89373 -1.09591 0.18
