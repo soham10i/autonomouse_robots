@@ -205,6 +205,8 @@ This is the *only* map the planner and DWA consume. Keeping it thin keeps planni
 In parallel we maintain a sparse 3D voxel grid (an **OctoMap** [Hornung et al., 2013] is
 the natural choice — it stores log-odds per voxel with the same Bayesian update as above,
 and its octree backing makes it memory-efficient for a sparsely-occupied indoor scene).
+The Python controller accesses OctoMap through the `octomap-python` binding (see §4), so
+all heavy work runs in the C++ backend while the control loop stays in Python.
 
 Back-project every valid depth pixel `(u, v, d)` through the camera intrinsics
 
@@ -212,13 +214,57 @@ Back-project every valid depth pixel `(u, v, d)` through the camera intrinsics
     Y_c = (v − c_y)·d / f_y
     Z_c = d
 
-transform by the camera-to-world pose `{R_wc, t_wc}` derived from the EKF pose
+and transform by the camera-to-world pose `{R_wc, t_wc}` derived from the EKF pose
 
     p_w = R_wc · [X_c, Y_c, Z_c]ᵀ + t_wc
 
-and write the log-odds update into the voxel containing `p_w` (hit ⇒ `ℓ_occ`, cells along
-the ray ⇒ `ℓ_free`, via a 3D Bresenham / DDA ray cast). Voxel edge length `0.05 m` matches
-the 2D grid resolution so the two are trivially aligned.
+Voxel edge length `0.05 m` matches the 2D grid resolution so the two are trivially aligned.
+
+**Batch insertion — the only viable per-tick path.** A naïve implementation would loop
+over every depth pixel in Python, call `updateNode()` per hit, and run a Python-level
+Bresenham raycast per beam. For a `640 × 480` Orbbec frame that is `~3·10⁵` pixels and
+therefore `~3·10⁵` raycasts every tick; the Webots `basicTimeStep` is `32 ms`, and any
+pure-Python raycasting loop blows past that budget by at least an order of magnitude.
+The control loop would miss its deadline, lidar scans would back up, and the EKF would
+integrate stale encoder deltas — which is exactly the drift failure mode §3.2 fights
+against.
+
+The fix is to do *all* of the per-pixel work in NumPy and let the OctoMap C++ backend
+do the ray-casting in one batch call per tick:
+
+```
+# 1. Depth image → camera-frame point cloud (vectorised NumPy)
+u, v   = np.meshgrid(np.arange(W), np.arange(H))
+z      = depth_image                          # (H, W)
+mask   = (z > z_min) & (z < z_max) & np.isfinite(z)
+Xc     = (u - cx) * z / fx
+Yc     = (v - cy) * z / fy
+pc_c   = np.stack([Xc, Yc, z], axis=-1)[mask] # (N, 3)
+
+# 2. Camera → world, also vectorised
+pc_w   = pc_c @ R_wc.T + t_wc                 # (N, 3)
+
+# 3. Single C++ call: ray-casts from the sensor origin to every point,
+#    marks traversed voxels free and endpoints occupied, applying the
+#    log-odds update natively.
+octree.insertPointCloud(
+    point_cloud = pc_w,
+    origin      = t_wc,
+    maxrange    = 5.0,
+    lazy_eval   = True,
+)
+# 4. Periodic compression — merges children with identical occupancy into
+#    their parent node, keeping the octree small.
+if tick % 20 == 0:
+    octree.updateInnerOccupancy()
+    octree.prune()
+```
+
+`insertPointCloud` internally performs the 3D Bresenham/DDA traversal that would be
+prohibitively slow in Python, writes `ℓ_free` along every ray and `ℓ_occ` at every
+endpoint, and respects the same clamping thresholds a hand-written log-odds update would.
+`lazy_eval = True` defers inner-node occupancy propagation to the periodic `prune()`
+call, which is how OctoMap is normally driven in real-time systems.
 
 What the 3D layer gives us that the 2D layer cannot:
 - Floating wall at `z = 0.45 m` is stored *at that height* — distinguishable from a
@@ -239,11 +285,36 @@ Define the projection
     π(x, y) = 1   if |C(x, y)| ≥ 1
             = 0   otherwise
 
-and OR `π` into the 2D log-odds layer (i.e. add `ℓ_occ` to cells where `π = 1` and a voxel
-above the chassis *did not* already account for it). Voxels strictly above `H_rob` — a
-suspended wall the robot can drive *under*, were there one — are kept in 3D but do **not**
-pollute the 2D costmap. This is the same slice-and-flatten trick used by ROS 2 nav2's
-`voxel_layer`.
+**Computational mechanism — bounding-box leaf query.** A full grid scan over every
+`(x, y)` voxel column every tick would again be too expensive. Instead we exploit
+OctoMap's native spatial indexing: the octree is traversed *once* over the axis-aligned
+bounding box `bbox = [(x_min, y_min, 0), (x_max, y_max, H_rob)]`, returning only the
+occupied leaf nodes that overlap the chassis slab.
+
+```
+bbmin = octomap.point3d(x_min, y_min, 0.0)
+bbmax = octomap.point3d(x_max, y_max, H_rob)
+
+two_d_hits = set()
+for leaf in octree.begin_leafs_bbx(bbmin, bbmax):
+    if octree.isNodeOccupied(leaf):
+        cx, cy = leaf.getX(), leaf.getY()          # leaf centre in world
+        ix, iy = world_to_grid(cx, cy)             # 2D grid index
+        two_d_hits.add((ix, iy))
+
+# Single vectorised write-back into the 2D log-odds grid
+for ix, iy in two_d_hits:
+    grid[ix, iy] += l_occ
+    grid[ix, iy]  = min(grid[ix, iy], l_max)       # clamp
+```
+
+`begin_leafs_bbx(...)` skips entire octree branches whose AABB lies outside the slab, so
+the walk is `O(occupied leaves ∩ chassis slab)`, *not* `O(total voxels)`. The result is
+the `(x, y)` set that gets OR-ed into the 2D log-odds layer, i.e. added with `ℓ_occ`
+where it is not already occupied. Voxels strictly above `H_rob` — a suspended wall the
+robot can drive *under*, were there one — are kept in 3D but do **not** pollute the 2D
+costmap. This is the same slice-and-flatten trick used by ROS 2 nav2's `voxel_layer`,
+specialised to the OctoMap backend.
 
 The 3D map is therefore the *source of truth*; the 2D grid is a derived, chassis-relevant
 slice of it, supplemented by the lidar. Both are updated with the same EKF pose and the
@@ -423,7 +494,17 @@ observable by the depth camera. If the robot charges sideways at a frontier, the
 camera never sees the airspace the chassis is about to occupy, and a floating wall can be
 struck before it enters the grid. The modified rule is:
 
-1. Extract frontier cells `F` from the occupancy grid (boundary of known-free ↔ unknown).
+1. **Extract frontiers from the OctoMap, not the 2D grid.** The 2D log-odds grid conflates
+   "free" with "never seen" (both sit near `p = 0.5` / `l = 0`), which makes the
+   known-free ↔ unknown boundary ambiguous. OctoMap tracks the three states explicitly: a
+   voxel is *occupied* (`l ≥ l_thresh_occ`), *free* (`l ≤ l_thresh_free`), or *unknown*
+   (no node exists in the tree at all — the hallmark of an octree is that absent voxels
+   carry the prior). Frontier voxels are therefore queried directly from the 3D tree: at
+   the chassis height `z_frontier = 0.1 m`, enumerate free leaves whose 6-neighbourhood
+   in `(x, y)` contains at least one cell where `octree.search(nx, ny, z_frontier)`
+   returns `None` (unknown). This gives an unambiguous frontier set `F` at a fraction of
+   the cost of a 2D raster scan, and — crucially — reuses the same data structure the
+   depth camera has already populated.
 2. Cluster `F` into frontier groups `F_j` and compute each centroid `c_j`.
 3. For each candidate `c_j`, penalise it by the angular offset between the robot's
    heading `θ` and the bearing to `c_j`:
@@ -464,6 +545,36 @@ the robot is physically permitted to get that close.
 ---
 
 ## 4. Sequence for implementation (recommended order)
+
+### 4.0 Dependency policy — standalone Python, no ROS
+
+The rules forbid the Webots *supervisor*, and the reference implementation of OctoMap
+ships as a ROS package. We therefore do **not** bring in ROS, the ROS bridge, or any
+Webots extern-controller indirection. Instead we use the standalone
+[`octomap-python`](https://github.com/wkentaro/octomap-python) binding (pybind11 over the
+upstream OctoMap C++ library) — this gives us `insertPointCloud`, `begin_leafs_bbx`,
+`search`, and the binary `.bt` writer from a single `pip install`, and keeps the entire
+controller as one ordinary Webots Python controller.
+
+All third-party dependencies must be pinned in a top-level `requirements.txt` shipped
+with the submission so evaluators can reproduce the run with a single `pip install -r
+requirements.txt`:
+
+```text
+# requirements.txt
+numpy>=1.24
+opencv-python>=4.8
+scipy>=1.10           # EKF helpers, rotation utilities
+octomap-python>=1.8   # standalone OctoMap binding (no ROS)
+matplotlib>=3.7       # optional: 2D grid / frontier visualisation
+```
+
+The `README.md` in the submission cross-references this file and states the target
+Python version (e.g. CPython 3.10) so that `octomap-python`'s prebuilt wheels install
+cleanly on the evaluator's machine. No other runtime prerequisites are introduced —
+in particular, no ROS distribution, no `colcon`, no external supervisor script.
+
+### 4.1 Build-up sequence
 
 1. **Webots controller skeleton** (Python). Enable devices with their own time step. Confirm with dummy open-loop commands that lidar, depth and camera produce data.
 2. **Odometry + EKF + scan-matching.** Drive in a square open-loop; verify the estimated pose closes on the start within a few cm. Because the floor is `CarpetFibers`, wheel-odom-only will drift visibly in `(x, y)` — implement the mandatory scan-to-map ICP update (§3.2) here, not later, and confirm the closing error drops to < 1 grid cell. Skipping this step invalidates everything built on top of the grid.

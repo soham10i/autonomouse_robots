@@ -21,15 +21,16 @@ pip install -r requirements.txt
 The project is being built in three phases so each piece can be debugged
 on its own.
 
-| Phase | Controller       | What it does                                                                                                                                            |
-|-------|------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------|
-| 1     | `teleop_mapping` | You drive with the arrow keys; lidar + depth + odometry record into a 2D grid and a 3D point cloud. Press `Q` to write `final_map.png`, `scene.ply`, `map.npz`. |
-| 2     | `maze_navigator` | Autonomous frontier exploration on top of the same mapping pipeline.                                                                                    |
-| 3     | `maze_navigator` | A* planner + pure-pursuit follower goes for blue → yellow with poison veto.                                                                              |
+| Phase | Controller       | What it does                                                                                                                                                                |
+|-------|------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 1     | `teleop_mapping` | You drive with the arrow keys; lidar + depth + odometry record into a 2D grid and a 3D point cloud. Press `Q` to write `final_map.png`, `scene.ply`, `map.npz`.             |
+| 2     | `auto_explorer`  | Robot drives itself via frontier exploration. Same outputs as Phase 1; pillar positions are recorded but not pursued. Stops when map is saturated or you press `Q`.         |
+| 3     | `maze_navigator` | A* planner + pure-pursuit follower goes for blue → yellow with poison veto. Can either map on the fly or load a Phase-1/2 `map.npz` (Phase 3 task).                          |
 
 Switch which controller a world uses by editing the `controller "..."`
 field in `Maze1/worlds/Maze1.wbt` (≈ line 36) or the matching line in
-`Maze2/worlds/Maze2.wbt`. Allowed values: `teleop_mapping`, `maze_navigator`.
+`Maze2/worlds/Maze2.wbt`. Allowed values: `teleop_mapping`,
+`auto_explorer`, `maze_navigator`.
 
 ## Run
 
@@ -73,7 +74,31 @@ the real name in the per-index listing.
    Outputs land in `Maze1/controllers/teleop_mapping/maps/` (or the Maze2
    equivalent).
 
-### Phase 2/3 — autonomous
+### Phase 2 — autonomous mapping
+
+1. Set the world's controller to `auto_explorer`.
+2. Click **Run**. The robot performs an initial in-place scan, then
+   repeatedly:
+
+   * extracts frontiers (boundary between known-free and unknown),
+   * picks the best one (size / distance, biased forward),
+   * plans an A* path on the soft costmap,
+   * follows it with pure pursuit + collision veto,
+   * recovers (reverse → spin → settle) when stuck.
+
+3. Press **Q** at any time to stop. Otherwise the controller exits
+   automatically when the unknown-cell count stops shrinking
+   (`EXPL_NO_FRONTIER_QUIT_S` in `auto_explorer.py`, default 12 s).
+4. Outputs are the same as Phase 1, written to
+   `Maze1/controllers/auto_explorer/maps/`:
+
+   * `final_map.png`, `scene.ply`, `map.npz`
+   * `explore_NNNN.png` live snapshots (path + frontier overlaid).
+
+   `map.npz` is binary-compatible with the Phase-1 file, so Phase 3 will
+   accept either as input.
+
+### Phase 3 — pillar mission (autonomous)
 
 Set the world's controller back to `maze_navigator` and run. Runtime
 artifacts go to `Maze1/controllers/maze_navigator/maps/`:

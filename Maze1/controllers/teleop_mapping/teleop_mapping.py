@@ -153,64 +153,70 @@ class TeleopMapping:
     def _smooth_pillar(self, name, pdet, pose):
         """Fold the latest detection into a running-mean world position.
 
-        Skipped when the depth at the centroid is unreliable (NaN, ≤0, or
-        absurdly far) — we don't want a single bad sample to drag the mean.
+        Filters applied in order:
+          1. Range cap  (PILLAR_MAX_DETECT_RANGE)
+          2. Height check — estimated real-world height must be
+             [PILLAR_HEIGHT * MIN_FRAC .. PILLAR_HEIGHT * MAX_FRAC]
+          3. Aspect ratio — blob must not be wider than PILLAR_ASPECT_MAX
+          4. Outlier rejection vs current running mean
+          5. Minimum observation count before publishing
         """
         rng = pdet.get("range", float("nan"))
         bearing = pdet["bearing"]
-        if not np.isfinite(rng) or rng <= 0.0 or rng > 6.0:
+        if not np.isfinite(rng) or rng <= 0.0 or rng > C.PILLAR_MAX_DETECT_RANGE:
             return
+
+        # ── Height validation ──
+        est_h = pdet.get("est_height", float("nan"))
+        if np.isfinite(est_h):
+            h_min = C.PILLAR_HEIGHT * C.PILLAR_HEIGHT_MIN_FRAC
+            h_max = C.PILLAR_HEIGHT * C.PILLAR_HEIGHT_MAX_FRAC
+            if est_h < h_min or est_h > h_max:
+                if pdet["area"] > 500: # Only print if it's a large blob to avoid spam
+                    print(f"[debug] Rejected {name} pillar: height {est_h:.2f}m not in [{h_min:.2f}, {h_max:.2f}]")
+                return  # too short (noise) or too tall (wall segment)
+
+        # ── Aspect ratio validation ──
+        aspect = pdet.get("aspect", float("nan"))
+        if np.isfinite(aspect) and aspect > C.PILLAR_ASPECT_MAX:
+            if pdet["area"] > 500:
+                print(f"[debug] Rejected {name} pillar: aspect {aspect:.2f} > {C.PILLAR_ASPECT_MAX}")
+            return  # too wide — likely a wall, not a pillar
+
         rx, ry, rth = pose
         gx = rx + rng * math.cos(rth + bearing)
         gy = ry + rng * math.sin(rth + bearing)
+
+        cur = self.pillar_world_pos[name]
+        if cur is not None:
+            if math.hypot(gx - cur[0], gy - cur[1]) > C.PILLAR_OUTLIER_REJECT_M:
+                return  # discard outlier — too far from current estimate
+
         buf = self._pillar_obs[name]
         buf.append((gx, gy))
         if len(buf) > C.PILLAR_OBS_AVG_N:
             buf.pop(0)
-        if len(buf) >= 2:
+        if len(buf) >= C.PILLAR_MIN_OBS_FOR_CONFIRM:
             xs = np.array([p[0] for p in buf])
             ys = np.array([p[1] for p in buf])
             self.pillar_world_pos[name] = (float(xs.mean()), float(ys.mean()))
             if not self._announced[name]:
                 wx, wy = self.pillar_world_pos[name]
-                print(f"[teleop] {name.upper()} pillar @ ({wx:+.2f}, {wy:+.2f})",
+                print(f"[teleop] {name.upper()} pillar @ ({wx:+.2f}, {wy:+.2f}) "
+                      f"h={est_h:.3f}m aspect={aspect:.2f} after {len(buf)} obs",
                       flush=True)
                 self._announced[name] = True
 
-    def _project_green_to_grid(self, gdet, pose):
-        """Project the green floor centroid to a world point and mark a
-        poison disc. Same projection as the autonomous controller — falls
-        back to a flat-floor pin-hole estimate when depth is unreliable."""
-        if gdet is None or self.perc is None:
-            return None
-        rng = gdet.get("range", float("nan"))
-        v_pix = gdet.get("v", self.perc.cy)
-        bearing = gdet.get("bearing", 0.0)
-        v_below = v_pix - self.perc.cy
-        if np.isfinite(rng) and rng > 0.15:
-            d_floor = float(rng)
-        elif v_below > 5:
-            d_floor = C.CAMERA_MOUNT_Z * self.perc.fx / v_below
-            if not (0.1 < d_floor < 4.5):
-                return None
-        else:
-            return None
-        x_r = d_floor
-        y_r = -math.tan(bearing) * d_floor
-        rx, ry, rth = pose
-        c, s = math.cos(rth), math.sin(rth)
-        wx = rx + c * x_r - s * y_r
-        wy = ry + s * x_r + c * y_r
-        if not self.grid.in_bounds(*self.grid.w2i(wx, wy)):
-            return None
-        was_marked = self.grid.is_poison_world(wx, wy)
-        self.grid.mark_poison(wx, wy, radius=C.POISON_DETECT_RADIUS)
-        if not was_marked:
-            print(f"[teleop] GREEN poison detected at ({wx:+.2f}, {wy:+.2f})",
-                  flush=True)
-        return (wx, wy)
-
     def _run_perception(self, pose):
+        """Run pillar HSV detection and per-pixel green-floor projection.
+
+        For green: we project EVERY green pixel individually onto the
+        floor plane (pinhole model with z=0) and mark each landed cell as
+        poison. This produces a footprint that matches the actual green
+        patch outline, rather than a fat 30cm disc around the centroid
+        that gets repainted from every viewpoint and accumulates into a
+        giant blob.
+        """
         if self.perc is None:
             return
         dets = self.perc.detect()
@@ -218,7 +224,13 @@ class TeleopMapping:
             self._smooth_pillar("blue", dets["blue"], pose)
         if dets.get("yellow") is not None:
             self._smooth_pillar("yellow", dets["yellow"], pose)
-        self._project_green_to_grid(dets.get("green"), pose)
+        # Per-pixel projection — the centroid+disc method was producing an
+        # oversized poison blob covering the whole map centre.
+        added = self.perc.project_green_floor_to_grid(self.grid, pose)
+        if added > 0 and not getattr(self, "_green_announced", False):
+            print(f"[teleop] GREEN poison: first projection added "
+                  f"{added} cells", flush=True)
+            self._green_announced = True
 
     # ----------------------------- per-tick ------------------------------
 
@@ -238,10 +250,14 @@ class TeleopMapping:
             d = self.clear._depth_image()
             if d is not None:
                 x_r, y_r, z_r = self.clear._robot_frame(d)
+                # z_r > AUX_OBSTACLE_Z_MIN (0.04m) catches LOW walls below
+                # the lidar plane (lidar is at 0.10m). Using LIDAR_MOUNT_Z
+                # here was a bug — it made the teleop map miss exactly the
+                # obstacles the depth-cam aux layer is meant to fill in.
                 valid = (np.isfinite(d) & (d > self.clear.depth_min)
-                         & (d < 3.0)
-                         & (z_r > C.LIDAR_MOUNT_Z)
-                         & (z_r < C.ROBOT_HEIGHT + 0.05))
+                         & (d < C.AUX_OBSTACLE_MAX_RANGE)
+                         & (z_r > C.AUX_OBSTACLE_Z_MIN)
+                         & (z_r < C.AUX_OBSTACLE_Z_MAX))
                 if valid.any():
                     rx, ry, rth = pose
                     c, s = math.cos(rth), math.sin(rth)
@@ -334,6 +350,13 @@ class TeleopMapping:
                         if p is not None
                         else np.array([np.nan, np.nan], dtype=np.float32))
 
+            # First recorded (x, y, θ) — anchor for the IMU-based localization
+            # fallback in map_runner. NaN if no pose was sampled.
+            start_pose = (np.array(self.pose_history[0], dtype=np.float32)
+                          if self.pose_history
+                          else np.array([np.nan, np.nan, np.nan],
+                                        dtype=np.float32))
+
             np.savez_compressed(
                 os.path.join(self.maps_dir, "map.npz"),
                 occupied=occ,
@@ -345,6 +368,7 @@ class TeleopMapping:
                 origin=np.array(self.grid.origin, dtype=np.float32),
                 cells=np.int32(self.grid.cells),
                 pose_history=np.array(self.pose_history, dtype=np.float32),
+                start_pose=start_pose,
                 pillar_blue=_pos_or_nan(self.pillar_world_pos.get("blue")),
                 pillar_yellow=_pos_or_nan(self.pillar_world_pos.get("yellow")),
             )
