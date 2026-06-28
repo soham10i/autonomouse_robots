@@ -1,0 +1,276 @@
+"""Webots-free self-test of the mak_02 Maze4 navigation pipeline.
+
+Exercises mapping -> scan-match -> costmap -> A* -> frontier -> DWA ->
+perception -> depth-aux -> IR-lookup on synthetic data and asserts sane
+behaviour.  Run with any Python that has NumPy:
+
+    python3 selftest.py
+"""
+from __future__ import annotations
+
+import math
+import os
+import sys
+
+import numpy as np
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+import config as C
+import astar
+import frontier as FR
+import ir_lookup
+import local_planner as LP
+from depth_model import DepthModel
+from mapping import LidarModel, OccupancyGrid
+from perception import Perception
+
+PASS, FAIL = "PASS", "FAIL"
+_fails = []
+
+
+def check(name, cond):
+    print(f"  [{PASS if cond else FAIL}] {name}")
+    if not cond:
+        _fails.append(name)
+
+
+def _room_ranges(lm, half=1.7, gap=(0.6, 1.2)):
+    out = []
+    for a in lm.angles:
+        if gap[0] < a < gap[1]:
+            out.append(11.5)
+            continue
+        c, s = math.cos(a), math.sin(a)
+        ts = []
+        for n_, off in ((c, half), (c, -half), (s, half), (s, -half)):
+            if abs(n_) > 1e-6:
+                t = off / n_
+                if t > 0:
+                    x, y = t * c, t * s
+                    if -half - 1e-6 <= x <= half + 1e-6 and -half - 1e-6 <= y <= half + 1e-6:
+                        ts.append(t)
+        out.append(min(ts) if ts else 11.5)
+    return np.array(out, dtype=np.float32)
+
+
+def main():
+    print("mak_02 Maze4 selftest")
+    lm = LidarModel(400, 2 * math.pi, 0.2, 12.0)
+    grid = OccupancyGrid()
+    pose = (0.0, 0.0, 0.0)
+    for _ in range(4):
+        r = _room_ranges(lm)
+        pts, rr = lm.ranges_to_body(r)
+        grid.integrate_scan(pose, pts, rr)
+    check("occupancy has walls", grid.occupied_mask().sum() > 100)
+    check("occupancy has free space", grid.free_mask().sum() > 500)
+
+    corr, hit = grid.scan_match((0.05, -0.04, 0.0), pts)
+    moved = math.hypot(corr[0], corr[1])
+    check("scan-match correction is bounded", moved <= C.SM_LIN_HALF + 1e-6)
+
+    # poison patch + costmap
+    pp = np.array([[0.5 + 0.02 * i, 0.02 * j] for i in range(-3, 4) for j in range(-3, 4)])
+    grid.add_poison_points(pp)
+    cost, lethal = grid.build_costmap()
+    check("poison created lethal cells", lethal.sum() > 0)
+    check("poison cell is lethal", lethal[grid.world_to_grid(0.5, 0.0)])
+
+    # A* to a free goal, avoiding poison
+    start = grid.world_to_grid(0.0, 0.0)
+    goal = grid.world_to_grid(-1.2, 0.9)
+    cells = astar.plan(cost, lethal, start, goal)
+    check("A* found a path", cells is not None and len(cells) > 1)
+    if cells:
+        simp = astar.simplify(cells, lethal)
+        check("path simplification shortens", len(simp) <= len(cells))
+        crosses = any(lethal[ix, iy] for ix, iy in cells)
+        check("A* path avoids lethal cells", not crosses)
+
+    # A* must ride the CENTRELINE of a tight corridor (the "align to absolute
+    # centre" requirement) and the clearance-aware simplify must NOT straighten
+    # that centred path back against a wall.
+    gc = OccupancyGrid()
+    csx = np.arange(-1.25, 1.26, 0.02)
+    for cxw in csx:
+        for yw in (0.20, 0.22, 0.24, -0.20, -0.22, -0.24):
+            ix, iy = gc.world_to_grid(cxw, yw)
+            if gc.in_bounds(ix, iy):
+                gc.L[ix, iy] = C.L_MAX
+    for yw in np.arange(-0.24, 0.25, 0.02):
+        for cxw in (-1.25, 1.25):
+            ix, iy = gc.world_to_grid(cxw, yw)
+            if gc.in_bounds(ix, iy):
+                gc.L[ix, iy] = C.L_MAX
+    cost_c, lethal_c = gc.build_costmap()
+    cc = astar.plan(cost_c, lethal_c, gc.world_to_grid(-1.0, 0.0), gc.world_to_grid(1.0, 0.0))
+    check("A* threads a 0.40 m corridor", cc is not None and len(cc) > 2)
+    if cc:
+        sc = astar.simplify(cc, lethal_c, cost_c)
+        dev = max(abs(gc.grid_to_world(ix, iy)[1]) for ix, iy in cc)
+        dev_s = max(abs(gc.grid_to_world(ix, iy)[1]) for ix, iy in sc)
+        check("A* rides the corridor centreline (raw dev < 0.04 m)", dev < 0.04)
+        check("clearance-aware simplify keeps the centred path (dev < 0.05 m)", dev_s < 0.05)
+
+    # frontiers exist at the gap
+    cands = FR.find_frontiers(grid, lethal, (0.0, 0.0), (0.0, 0.0))
+    check("frontiers detected at the opening", len(cands) >= 1)
+
+    # DWA: open space straight, smoothness bounded
+    d = LP.DWAPlanner(0.032)
+    EMPTY = np.empty((0, 2))
+    v = w = 0.0
+    for _ in range(40):
+        v, w = d.compute((0, 0, 0), (2.0, 0.0), EMPTY, EMPTY)
+    check("DWA drives forward in open space", v > 0.3 and abs(w) < 0.1)
+    d = LP.DWAPlanner(0.032)
+    prev = (0.0, 0.0)
+    mdw = 0.0
+    for _ in range(30):
+        v, w = d.compute((0, 0, 0), (0.0, 2.0), EMPTY, EMPTY)
+        mdw = max(mdw, abs(w - prev[1]))
+        prev = (v, w)
+    check("DWA angular rate is jerk-limited", mdw <= C.A_W * 0.032 + 1e-6)
+    v, w = LP.DWAPlanner(0.032).compute((0, 0, 0), (1.0, 0.0), EMPTY, EMPTY, green_block=True)
+    check("green_block forbids forward motion", v <= 0.0)
+
+    # closed-loop regression (the headline bug): driving the REAL carrot + DWA
+    # down a narrow corridor must cover ground at cruising speed, not crawl a
+    # few centimetres.  Fails if the compounding proximity slowdown caps -- or
+    # the backward-aiming carrot on a simplified straight path -- ever return.
+    import dryrun
+    walls = dryrun.corridor_walls([(-0.3, 0.0), (4.3, 0.0)], half_width=0.17)
+    res = dryrun.simulate("selftest-narrow", (0.0, 0.0, 0.0),
+                          [(0.0, 0.0), (4.0, 0.0)], walls, max_ticks=900)
+    check("closed-loop: robot drives a narrow corridor at speed (no crawl)",
+          res["reached"] and res["avg_speed"] > 0.15)
+
+    # perception: blue pillar + green floor
+    per = Perception(640, 480, 1.04)
+    img = np.zeros((480, 640, 3), dtype=np.uint8)
+    img[150:330, 300:340] = (255, 30, 0)      # BGR blue blob
+    img[360:480, 250:400] = (0, 200, 0)       # green floor strip
+    dets = per.update_pillars(img, None, (0.0, 0.0, 0.0))
+    check("blue pillar detected", dets["blue"] is not None)
+    check("blue pillar world position set", per.pillar_world["blue"] is not None)
+    gw = per.green_floor_world(img, (0.0, 0.0, 0.0))
+    check("green floor projected to world points", gw.shape[0] > 0)
+    check("green reflex fires on poison ahead", per.green_reflex(img))
+
+    # ---------------------------------------------------- NEW for Maze4 ----
+    # depth thin-scan: a low panel in front, height band correctly applied
+    dm = DepthModel(80, 60, 1.04, mount_z=C.CAMERA_MOUNT_Z, depth_min=0.05, depth_max=8.0)
+    depth_img = np.full((60, 80), 6.0, dtype=np.float32)   # default: far / clear
+    # a low panel at range 0.5 m spanning rows whose body height z_r is in-band.
+    # row v maps to z_r = -(v-cy)/fy*depth + mount_z; solve for v at z_r=0.05 m.
+    cy, fy = dm.cy, dm.fy
+    rng = 0.5
+    v_for_z = lambda z: cy - (z - dm.mount_z) * fy / rng
+    v_lo, v_hi = sorted([int(v_for_z(C.AUX_Z_MIN + 0.01)), int(v_for_z(C.AUX_Z_MAX - 0.01))])
+    depth_img[v_lo:v_hi, 30:50] = rng   # in-band low panel, columns 30-49
+    bearings, hit_ranges, hit_mask, clear_mask = dm.thin_scan(depth_img)
+    check("thin-scan hits the in-band low panel", bool(hit_mask[35:45].all()))
+    check("thin-scan range matches the panel", abs(float(hit_ranges[40]) - rng) < 0.05)
+    check("thin-scan reports clear columns elsewhere", bool(clear_mask[5]))
+
+    # a pixel ABOVE robot height must be excluded (drivable-under, not a hit)
+    depth_img2 = np.full((60, 80), 6.0, dtype=np.float32)
+    v_hi_only = int(cy - (C.AUX_Z_MAX + 0.05 - dm.mount_z) * fy / rng)
+    depth_img2[max(0, v_hi_only - 5):v_hi_only + 5, 30:50] = rng
+    _, _, hit_mask2, clear_mask2 = dm.thin_scan(depth_img2)
+    check("pixel above ROBOT_HEIGHT is excluded from hits", not bool(hit_mask2[40]))
+
+    # aux layer: a hit stamps the cell; the SAME bearing later reporting CLEAR
+    # must erase it -- this is the core anti-Maze1-bug property (no permanent
+    # "purple thickening": a clear sight-line always wins over a stale mark).
+    grid2 = OccupancyGrid()
+    bearings_one = np.array([0.0])
+    hit_ranges_one = np.array([0.5])
+    hit_mask_one = np.array([True])
+    clear_mask_one = np.array([False])
+    grid2.integrate_aux((0.0, 0.0, 0.0), bearings_one, hit_ranges_one,
+                        hit_mask_one, clear_mask_one, depth_min=0.05)
+    check("aux hit stamps a cell", grid2.aux.sum() == 1)
+    ex, ey = 0.5 * math.cos(0.0), 0.5 * math.sin(0.0)
+    check("aux hit cell is at the expected world point",
+          grid2.aux[grid2.world_to_grid(ex, ey)])
+
+    clear_mask_one2 = np.array([True])
+    hit_mask_one2 = np.array([False])
+    grid2.integrate_aux((0.0, 0.0, 0.0), bearings_one, hit_ranges_one,
+                        hit_mask_one2, clear_mask_one2, depth_min=0.05)
+    check("a later CLEAR reading erases the stale aux mark", grid2.aux.sum() == 0)
+
+    # aux feeds the costmap as lethal, same as a lidar wall
+    grid2.integrate_aux((0.0, 0.0, 0.0), bearings_one, hit_ranges_one,
+                        hit_mask_one, clear_mask_one, depth_min=0.05)
+    cost2, lethal2 = grid2.build_costmap()
+    check("aux cell is lethal in the costmap", lethal2[grid2.world_to_grid(ex, ey)])
+
+    # mark_free_disc clears aux in the robot's own footprint (Maze1's "robot
+    # boxes itself in and can never erase it" failure mode)
+    grid2.mark_free_disc(ex, ey, 0.2)
+    check("mark_free_disc also clears aux in the footprint", grid2.aux.sum() == 0)
+
+    # IR lookup-table inversion round-trips
+    table = [0.0, 1000.0, 0.0, 0.5, 100.0, 0.0]   # inverse-linear: close=high val
+    lut = ir_lookup.build_lookup(table)
+    d_at_500 = ir_lookup.value_to_meters(lut, 1000.0)
+    d_at_far = ir_lookup.value_to_meters(lut, 100.0)
+    check("IR lookup: max value -> min distance", abs(d_at_500 - 0.0) < 1e-6)
+    check("IR lookup: min value -> max distance", abs(d_at_far - 0.5) < 1e-6)
+    mid = ir_lookup.value_to_meters(lut, 550.0)
+    check("IR lookup: mid value -> mid distance", 0.2 < mid < 0.3)
+    check("IR lookup: out-of-range value clamps",
+          ir_lookup.value_to_meters(lut, 5000.0) == 0.0)
+    empty_lut = ir_lookup.build_lookup([], max_value_fallback=4.0)
+    check("IR lookup: empty table falls back gracefully", empty_lut[1] == 4.0)
+
+    # ------------------------------------------------------ stuck watchdog --
+    # Regression for the exact deadlock reported in Webots: when no reachable
+    # frontier exists, the FSM commands (v=0, w=INIT_SPIN_W) -- an in-place
+    # rescan spin.  The watchdog must catch this from POSITION alone; it must
+    # NOT require a forward command (that gate let heading keep changing every
+    # tick while position never did, so neither the old commanding-forward
+    # stuck-check nor the heading-aware frozen-check ever fired -> infinite
+    # spin).  Stub the `controller` module so the FSM class can be imported
+    # without a real Webots runtime (only robot_io.py needs it, and it is
+    # never instantiated here).
+    import types
+    fake_controller = types.ModuleType("controller")
+    fake_controller.Robot = object
+    fake_controller.Keyboard = object
+    sys.modules.setdefault("controller", fake_controller)
+    import mak_02_controller as M
+
+    class _StuckProbe:
+        pose = (1.23, -4.56, 0.0)
+        recovery_chain = 0
+        _progress_ref = None
+        _progress_ref_t = 0.0
+
+    probe = _StuckProbe()
+    probe._reset_progress = M.Mak02Controller._reset_progress.__get__(probe)
+    is_stuck = M.Mak02Controller._is_stuck.__get__(probe)
+    check("stuck watchdog: false before any reference is set", not is_stuck(0.0))
+    t = 0.0
+    spinning_was_caught = False
+    while t < C.STUCK_TIMEOUT_S + 1.0:
+        # position never changes (a pure in-place spin); only time advances.
+        if is_stuck(t):
+            spinning_was_caught = True
+            break
+        t += 0.1
+    check("stuck watchdog fires on a position-frozen spin (no forward command needed)",
+          spinning_was_caught and t <= C.STUCK_TIMEOUT_S + 0.15)
+
+    print()
+    if _fails:
+        print(f"FAILED ({len(_fails)}): {_fails}")
+        sys.exit(1)
+    print("ALL CHECKS PASSED")
+
+
+if __name__ == "__main__":
+    main()

@@ -38,6 +38,8 @@ from fsm import State, MissionFSM
 from recovery import StuckMonitor, Recovery
 from debug_viz import dump_grid, dump_costmap, dump_camera_masks
 from mapping_export import export_ply, export_final_png
+import wall_reflex
+from topo_graph import TopoGraph
 
 
 class MazeNavigator:
@@ -100,6 +102,35 @@ class MazeNavigator:
         self.pose_history = []
         self._export_done = False
 
+        # IR proximity reflex (virtual bumper). The reflex layer sits inside
+        # _drive and modifies (v, w) when a corner IR senses a wall edge
+        # closer than IR_REFLEX_TRIGGER. ReflexState carries the hysteresis
+        # flag + per-IR fire counts so we can summarise at finalise.
+        self._reflex_state = wall_reflex.ReflexState()
+        self._reflex_logged_why = None     # de-dupe spam: log only on edge
+        self._ir_status_printed = False    # one-shot post-INIT_SCAN sanity print
+        # Reflex-time-bound escalation: if MAX_HOLD_S fires twice within 3 s
+        # we declare the bot wedged and force a recovery (Change 6).
+        self._reflex_timebound_count = 0
+        self._reflex_last_timebound_t = -math.inf
+
+        # Topological graph (step 2: PASSIVE). Built every tick from the
+        # lidar scan; does NOT influence driving yet. Saved at finalise as
+        # graph.json (the memory table) + graph.png (visual check).
+        self.topo = TopoGraph(log_fn=self._fsm_log)
+
+        # Frontier replan throttling + blacklisting (Change 3 + 4).
+        # We log "[planner] frontier plan -> ..." only when the target XY
+        # changes, and we count consecutive replans to the same target where
+        # the bot's pose hasn't moved meaningfully. After STALE_REPLAN_MAX
+        # such failures we blacklist the frontier with a generous radius so
+        # we don't immediately pick a neighbour cell.
+        self._planner_last_target = None
+        self._planner_last_target_t = -math.inf
+        self._planner_pose_at_last = None
+        self._planner_stale_count = 0
+        self._planner_last_path_len = 0
+
     # ----------------------------- helpers ------------------------------
 
     def _fsm_log(self, msg):
@@ -131,16 +162,22 @@ class MazeNavigator:
     def _smooth_pillar(self, name, pdet):
         rng = pdet.get("range", float("nan"))
         bearing = pdet["bearing"]
-        if not np.isfinite(rng) or rng <= 0.0 or rng > 6.0:
+        if not np.isfinite(rng) or rng <= 0.0 or rng > C.PILLAR_MAX_DETECT_RANGE:
             return
         rx, ry, rth = self.odom.pose()
         gx = rx + rng * math.cos(rth + bearing)
         gy = ry + rng * math.sin(rth + bearing)
+
+        cur = self.pillar_world_pos[name]
+        if cur is not None:
+            if math.hypot(gx - cur[0], gy - cur[1]) > C.PILLAR_OUTLIER_REJECT_M:
+                return  # outlier — far from running mean
+
         buf = self._pillar_obs[name]
         buf.append((gx, gy))
         if len(buf) > C.PILLAR_OBS_AVG_N:
             buf.pop(0)
-        if len(buf) >= 2:
+        if len(buf) >= C.PILLAR_MIN_OBS_FOR_CONFIRM:
             xs = np.array([p[0] for p in buf])
             ys = np.array([p[1] for p in buf])
             self.pillar_world_pos[name] = (float(xs.mean()), float(ys.mean()))
@@ -178,19 +215,26 @@ class MazeNavigator:
                   flush=True)
         return (wx, wy)
 
-    def _project_aux_obstacles(self, pose, max_range=2.5):
-        """Use the depth cam to mark chassis-height obstacles into the
-        aux_obstacle layer. Lightweight — runs every tick."""
+    def _project_aux_obstacles(self, pose, max_range=None):
+        """Use the depth cam to mark obstacles in the bot's collision band
+        into the aux_obstacle layer.
+
+        The z range covers everything from just above the floor up to the
+        top of the chassis — including walls *below* the 2D lidar plane
+        (0.10 m), which the lidar can't see at all. Without this, low
+        floating walls become invisible to the planner."""
         if not self.clear.ok:
             return
         d = self.clear._depth_image()
         if d is None:
             return
-        # Only project depths inside [LIDAR_MOUNT_Z, ROBOT_HEIGHT + 5cm]
+        if max_range is None:
+            max_range = C.AUX_OBSTACLE_MAX_RANGE
         x_r, y_r, z_r = self.clear._robot_frame(d)
         valid = (np.isfinite(d) & (d > self.clear.depth_min)
                  & (d < max_range)
-                 & (z_r > C.LIDAR_MOUNT_Z) & (z_r < C.ROBOT_HEIGHT + 0.05))
+                 & (z_r > C.AUX_OBSTACLE_Z_MIN)
+                 & (z_r < C.AUX_OBSTACLE_Z_MAX))
         if not valid.any():
             return
         xr = x_r[valid]
@@ -290,26 +334,104 @@ class MazeNavigator:
         return True, path
 
     def _replan_to_frontier(self):
+        """Frontier replan with throttle, log de-dupe, and stale-target
+        blacklisting.
+
+        We were burning A* every tick on the same unreachable target and
+        log-spamming hundreds of identical lines. The fix:
+
+          1. Throttle: once we've planned to a target, don't replan to the
+             *same* target until ASTAR_REPLAN_EVERY_S has elapsed (or the
+             target meaningfully moves). Keeps the existing path alive.
+          2. Log de-dupe: print "[planner] frontier plan -> ..." only when
+             the target XY changes (or path length differs noticeably).
+          3. Stale-target blacklist: if the bot's pose hasn't moved by
+             > 0.10 m across STALE_REPLAN_MAX successful replans to the
+             same target, blacklist the frontier with a generous radius
+             so neither it nor its immediate neighbours can be re-picked.
+        """
+        STALE_REPLAN_MAX = 5
+        STALE_POSE_DELTA_M = 0.10
+
         f = self.explore.find_frontier(
             self.odom.pose(), blacklist=self.frontier_blacklist
         )
         if f is None:
             return False
+
+        now = self.sim_time
+        pose = self.odom.pose()
+        same_target = (
+            self._planner_last_target is not None
+            and math.hypot(f[0] - self._planner_last_target[0],
+                           f[1] - self._planner_last_target[1]) < 0.15
+        )
+
+        # ── (1) throttle: skip replan to same target if we replanned recently
+        if same_target and (now - self._planner_last_target_t) < C.ASTAR_REPLAN_EVERY_S:
+            return True   # last plan still valid, leave path alone
+
+        # ── (3) stale-target detection: count consecutive same-target replans
+        # where the bot's pose barely moved. If we hit STALE_REPLAN_MAX,
+        # blacklist this frontier (and a halo around it) and bail.
+        if same_target:
+            if (self._planner_pose_at_last is not None
+                    and math.hypot(pose[0] - self._planner_pose_at_last[0],
+                                   pose[1] - self._planner_pose_at_last[1])
+                        < STALE_POSE_DELTA_M):
+                self._planner_stale_count += 1
+            else:
+                self._planner_stale_count = 0
+        else:
+            self._planner_stale_count = 0
+
+        if self._planner_stale_count >= STALE_REPLAN_MAX:
+            # Blacklist the target with a wide radius so a neighbour cell
+            # can't be re-picked next tick. The blacklist matcher in
+            # ``Explorer.find_frontier`` uses point-distance only, so we
+            # add a few sentinel points around the target.
+            print(f"[planner] frontier {f} stale x{self._planner_stale_count} "
+                  f"(pose ~unchanged) → blacklisting + halo",
+                  flush=True)
+            self.frontier_blacklist.append(f)
+            for dx in (-0.4, 0.0, 0.4):
+                for dy in (-0.4, 0.0, 0.4):
+                    if dx == 0 and dy == 0:
+                        continue
+                    self.frontier_blacklist.append((f[0] + dx, f[1] + dy))
+            self.frontier_blacklist = self.frontier_blacklist[-30:]
+            self._planner_stale_count = 0
+            self._planner_last_target = None
+            return False
+
+        # ── plan the path
         path, idx, cost = plan_to_world(self.grid, self.odom.pose(), f)
         self.last_costmap = cost
         if path is None:
-            # blacklist this frontier so we don't keep retrying it
             print(f"[planner] frontier unreachable, blacklisting {f}",
                   flush=True)
             self.frontier_blacklist.append(f)
             self.frontier_blacklist = self.frontier_blacklist[-15:]
+            self._planner_last_target = None
             return False
+
         self.follower.set_path(path, final_tol=0.30)
         self.cur_frontier = f
         self.cur_standoff = None
-        self.t_last_plan = self.sim_time
-        print(f"[planner] frontier plan -> {f} len={len(path)}",
-              flush=True)
+        self.t_last_plan = now
+
+        # ── (2) log de-dupe: log only on target change or significant length
+        # change so the console stays readable.
+        is_new_target = not same_target
+        plen_changed = abs(len(path) - self._planner_last_path_len) >= 2
+        if is_new_target or plen_changed:
+            print(f"[planner] frontier plan -> ({f[0]:+.2f}, {f[1]:+.2f}) "
+                  f"len={len(path)}", flush=True)
+
+        self._planner_last_target = f
+        self._planner_last_target_t = now
+        self._planner_pose_at_last = (pose[0], pose[1])
+        self._planner_last_path_len = len(path)
         return True
 
     def _path_invalid(self):
@@ -361,8 +483,58 @@ class MazeNavigator:
     # ----------------------------- main step ----------------------------
 
     def _drive(self, v, w):
-        self.io.set_cmd(v, w)
-        self.stuck.update(self.odom.pose(), w, self.sim_time)
+        # ── IR virtual-bumper reflex ───────────────────────────────────────
+        # Reads the four corner IR rangers and pushes (v, w) away from any
+        # wall closer than IR_REFLEX_TRIGGER. Bypassed automatically for
+        # INIT_SCAN / RECOVERY / DONE via wall_reflex.DISABLED_STATES, so
+        # this hook is safe to leave permanently in _drive.
+        ir_m = self.io.read_ir_m()
+        v_out, w_out, fired, why = wall_reflex.adjust(
+            v, w, ir_m, self.fsm.state, self.sim_time, self._reflex_state,
+        )
+        # Edge-triggered logging: log only when the reason changes (we tick
+        # at 32 ms, so a sustained reflex would otherwise spam ~30 lines/s).
+        if fired and why != self._reflex_logged_why:
+            ir_str = "  ".join(
+                f"{k.split('_')[0]}={ir_m.get(k, float('nan')):.2f}"
+                for k in ("fl_range", "fr_range", "rl_range", "rr_range")
+            )
+            print(f"[reflex] {why}  ir=({ir_str})  "
+                  f"cmd ({v:+.2f}, {w:+.2f}) → ({v_out:+.2f}, {w_out:+.2f})",
+                  flush=True)
+            self._reflex_logged_why = why
+        elif not fired and self._reflex_logged_why is not None:
+            print(f"[reflex] released  ir-clear", flush=True)
+            self._reflex_logged_why = None
+
+        # Time-bound escape with escalation (Change 6).
+        # First time-bound: just release the reflex and let the planner try
+        # again. Second time-bound within 3 s: the bot is genuinely wedged,
+        # escalate to the recovery FSM so a deliberate reverse + spin runs.
+        if wall_reflex.time_bound_check(self._reflex_state, self.sim_time):
+            now = self.sim_time
+            if (now - self._reflex_last_timebound_t) < 3.0:
+                self._reflex_timebound_count += 1
+            else:
+                self._reflex_timebound_count = 1
+            self._reflex_last_timebound_t = now
+            self._reflex_state.active = False
+            self._reflex_logged_why = None
+            if (self._reflex_timebound_count >= 2
+                    and self.fsm.state != State.RECOVERY):
+                print(f"[reflex] held > {wall_reflex.MAX_HOLD_S:.1f}s ×"
+                      f"{self._reflex_timebound_count} within 3 s — "
+                      f"escalating to recovery FSM", flush=True)
+                self._reflex_timebound_count = 0
+                self._enter_recovery("reflex-wedged")
+                return  # _enter_recovery already issued the recovery cmds
+            print(f"[reflex] held > {wall_reflex.MAX_HOLD_S:.1f}s — "
+                  f"pass-through (#{self._reflex_timebound_count})",
+                  flush=True)
+            v_out, w_out = v, w   # pass-through this tick
+
+        self.io.set_cmd(v_out, w_out)
+        self.stuck.update(self.odom.pose(), w_out, self.sim_time)
 
     def _enter_recovery(self, reason=""):
         if self.fsm.recovery_chain >= C.RECOVERY_MAX_CHAIN:
@@ -430,6 +602,14 @@ class MazeNavigator:
         self._track_spin()
         if self.theta_spin_accum >= 2 * math.pi * C.INITIAL_SCAN_REVS:
             self.io.stop()
+            # One-shot IR sanity print AFTER the bot has spun in place — by
+            # now the IR sensor buffers are populated and the bot is in an
+            # essentially open part of the maze. If any IR reads < 0.30 m
+            # here, the lookup-table conversion is wrong (or the sensor is
+            # mounted such that it sees the chassis itself).
+            if not self._ir_status_printed:
+                self.io.print_ir_status("post-INIT_SCAN open-space")
+                self._ir_status_printed = True
             self.fsm.transition(State.EXPLORE_BLUE, self.sim_time)
             self.follower.set_path([])
             self.cur_frontier = None
@@ -584,6 +764,14 @@ class MazeNavigator:
         if self._export_done:
             return
         self._export_done = True
+        # IR reflex post-mortem: how often did the virtual bumper save us?
+        print(f"[reflex] mission summary: {self._reflex_state.summary()}",
+              flush=True)
+        # Topological graph (step 2): dump the memory table + a visual.
+        print(f"[topo] graph summary: {self.topo.summary()}", flush=True)
+        self.topo.save_json(os.path.join(self.png_dir, "graph.json"))
+        self.topo.save_png(os.path.join(self.png_dir, "graph.png"),
+                           grid=self.grid)
         try:
             export_final_png(
                 os.path.join(self.png_dir, "final_map.png"),
@@ -640,7 +828,26 @@ class MazeNavigator:
                     self._smooth_pillar("blue", dets["blue"])
                 if dets.get("yellow") is not None:
                     self._smooth_pillar("yellow", dets["yellow"])
-                self._project_green_to_grid(dets.get("green"))
+                # Per-pixel green-floor poison projection — much more
+                # accurate than the old centroid+disc method which produced
+                # an oversized poison blob covering the whole map centre.
+                if self.perc is not None:
+                    self.perc.project_green_floor_to_grid(self.grid, pose)
+
+                # Periodically erase stale aux_obstacle marks where the
+                # lidar now confirms the cell is free. Without this, every
+                # depth reading the bot has ever taken accumulates as
+                # ghost walls that block the planner over time.
+                if self.tick % 50 == 0:
+                    self.grid.clear_aux_where_free()
+
+                # 3b. topological graph (step 2: PASSIVE observation) ----
+                # Builds the junction/dead-end graph from the lidar scan.
+                # Does NOT influence driving — purely records the "memory
+                # table" so we can validate node detection before step 3.
+                if angles_arr.size > 0:
+                    self.topo.observe(pose, ranges_arr, angles_arr,
+                                      self.grid, self.sim_time)
 
                 # 4. cloud accumulation ----------------------------------
                 self._accumulate_cloud()

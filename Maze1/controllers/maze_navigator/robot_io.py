@@ -64,11 +64,19 @@ class RobotIO:
             self.compass.enable(self.timestep)
 
         self.ir_sensors = []
+        # Per-sensor lookup-table cache: maps device name → (val_min, val_max,
+        # dist_at_val_min, dist_at_val_max). Webots ``DistanceSensor.getValue()``
+        # returns a raw value mapped via the proto's ``lookupTable`` — for
+        # ROSbot's IRs this is typically inverse-linear (close → high value,
+        # far → low value). We store the endpoints so ``read_ir_m()`` can
+        # invert the mapping cheaply every tick.
+        self._ir_lookup = {}
         for n in C.IR_RANGE_NAMES:
             d = self.robot.getDevice(n)
             if d is not None:
                 d.enable(self.timestep)
                 self.ir_sensors.append((n, d))
+                self._ir_lookup[n] = self._build_ir_lookup(d)
 
         self._log_inventory()
 
@@ -126,3 +134,116 @@ class RobotIO:
         if self.gyro is not None:
             return self.gyro.getValues()[2]
         return None
+
+    # ------------------------------------------------------------------
+    # IR proximity sensors
+    # ------------------------------------------------------------------
+
+    def _build_ir_lookup(self, sensor):
+        """Pre-compute a value→metres mapping from the proto's lookupTable.
+
+        Webots ``DistanceSensor.getLookupTable()`` returns a flat list of
+        triples ``[d0, val0, std0, d1, val1, std1, ...]`` sorted by
+        distance. The ROSbot IR proto is inverse-linear (close ⇒ high
+        value, far ⇒ low value); a few protos use the opposite direction
+        or a non-linear curve. We support both linear cases by caching
+        the table's two extreme points and linearly inverting between
+        them. Sensors with no usable table fall back to "raw value is
+        already metres" — callers can spot mis-conversion via the
+        startup sanity print.
+
+        Returns ``(d_min, d_max, val_at_dmin, val_at_dmax, max_range)``.
+        """
+        try:
+            tbl = sensor.getLookupTable()
+        except Exception:
+            tbl = []
+        if not tbl or len(tbl) < 6:
+            # No usable lookup → assume getValue() is already metres,
+            # clamped to whatever getMaxValue() is.
+            try:
+                mx = float(sensor.getMaxValue())
+            except Exception:
+                mx = 4.0
+            return (0.0, mx, 0.0, mx, mx)
+
+        # Walk in groups of 3 to find min/max distance points.
+        rows = [(float(tbl[i]), float(tbl[i + 1])) for i in range(0, len(tbl), 3)]
+        rows.sort(key=lambda r: r[0])
+        d_min, val_min = rows[0]
+        d_max, val_max = rows[-1]
+        return (d_min, d_max, val_min, val_max, d_max)
+
+    def _ir_value_to_meters(self, name, value):
+        """Convert one IR raw value to metres using the cached mapping."""
+        info = self._ir_lookup.get(name)
+        if info is None:
+            return float("nan")
+        d_min, d_max, v_at_dmin, v_at_dmax, _ = info
+        # Guard against degenerate tables.
+        if abs(v_at_dmax - v_at_dmin) < 1e-6:
+            return d_max
+        # Linear inversion: distance = d_min + (val - v_at_dmin) * slope
+        # where slope = (d_max - d_min) / (v_at_dmax - v_at_dmin). For an
+        # inverse-linear table (val_at_dmin > val_at_dmax) the slope is
+        # negative, which is exactly what we want.
+        slope = (d_max - d_min) / (v_at_dmax - v_at_dmin)
+        d = d_min + (value - v_at_dmin) * slope
+        # Clamp to the table's domain — readings outside it are noise.
+        if d < d_min:
+            d = d_min
+        elif d > d_max:
+            d = d_max
+        return d
+
+    def read_ir_m(self):
+        """Return ``{sensor_name: distance_in_metres}`` for all IRs.
+
+        ``NaN`` for any sensor whose raw read or lookup conversion fails.
+        Empty dict if no IRs were discovered at startup. Cheap enough
+        to call every tick.
+        """
+        out = {}
+        for n, dev in self.ir_sensors:
+            try:
+                raw = dev.getValue()
+            except Exception:
+                out[n] = float("nan")
+                continue
+            out[n] = self._ir_value_to_meters(n, raw)
+        return out
+
+    def ir_max_range(self, name):
+        """Return the configured max distance for sensor ``name`` (m)."""
+        info = self._ir_lookup.get(name)
+        return info[4] if info else float("inf")
+
+    def print_ir_status(self, label="open-space"):
+        """Diagnostic: print one line of IR distances + raw values.
+
+        Call AFTER a few simulation steps so the sensor buffers are
+        populated. Use it to sanity-check the lookup-table conversion
+        before relying on the IRs in the control loop.
+        """
+        if not self.ir_sensors:
+            print("[ir] no IR sensors discovered", flush=True)
+            return
+        parts = []
+        for n, dev in self.ir_sensors:
+            try:
+                raw = dev.getValue()
+                m = self._ir_value_to_meters(n, raw)
+                parts.append(f"{n}: {m:.2f}m (raw={raw:.0f})")
+            except Exception as e:
+                parts.append(f"{n}: ERR ({e})")
+        print(f"[ir] {label} | " + " | ".join(parts), flush=True)
+        # Per-sensor lookup-table summary so we can verify mapping orientation.
+        for n, dev in self.ir_sensors:
+            info = self._ir_lookup.get(n)
+            if info is None:
+                continue
+            d_min, d_max, v_min, v_max, _ = info
+            kind = "inverse" if v_min > v_max else "direct"
+            print(f"[ir] {n}: lookup {kind}-linear  "
+                  f"d∈[{d_min:.2f}, {d_max:.2f}]m  "
+                  f"v[{v_min:.0f}…{v_max:.0f}]", flush=True)

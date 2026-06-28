@@ -1,0 +1,27 @@
+============================================================
+MAP RUNNER — MISSION SUMMARY
+============================================================
+Final state            : INIT_SCAN
+Total sim time         : 1.76s
+Logged ticks           : 13
+
+── Timing ──
+BLUE reached           : NEVER
+YELLOW reached         : NEVER
+
+── Path lengths (planned) ──
+Start → BLUE           : 0.00 m
+BLUE  → YELLOW         : 0.00 m
+
+── ICP Scan Matching ──
+Total corrections      : 17
+Mean error             : 0.0000 m
+Max error              : 0.0000 m
+
+── Recovery ──
+Total maneuvers        : 0
+
+── Landmarks ──
+BLUE pillar            : None
+YELLOW pillar          : None
+Poison cells (final)   : 0

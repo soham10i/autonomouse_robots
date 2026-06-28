@@ -84,7 +84,7 @@ class ClearanceChecker:
         if height_lo is None:
             height_lo = C.LIDAR_MOUNT_Z        # don't duplicate lidar's job
         if height_hi is None:
-            height_hi = C.ROBOT_HEIGHT + 0.05  # top of chassis + margin
+            height_hi = C.ROBOT_HEIGHT  # top of chassis — passages above are clear
         d = self._depth_image()
         if d is None:
             return float("inf")

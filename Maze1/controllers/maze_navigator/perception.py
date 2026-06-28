@@ -116,7 +116,28 @@ class PillarDetector:
                 return None
         bearing = -math.atan2(cu - self.cx, self.fx)
         rng = self._depth_at(cu, cv)
-        return {"u": cu, "v": cv, "area": area, "bearing": bearing, "range": rng}
+
+        # ── height & aspect-ratio estimation ──
+        # Find the bounding box of the coloured blob in pixel coords.
+        ys_nz, xs_nz = np.nonzero(mask)
+        est_height = float("nan")
+        aspect = float("nan")
+        if len(ys_nz) > 0:
+            v_top, v_bot = int(ys_nz.min()), int(ys_nz.max())
+            u_left, u_right = int(xs_nz.min()), int(xs_nz.max())
+            pix_h = v_bot - v_top + 1
+            pix_w = u_right - u_left + 1
+            if pix_h > 0:
+                aspect = pix_w / pix_h
+            # Pinhole projection: real_height = pixel_height × depth / fy
+            # For square pixels fy ≈ fx.
+            if np.isfinite(rng) and rng > 0 and pix_h > 0:
+                est_height = pix_h * rng / self.fx
+
+        return {
+            "u": cu, "v": cv, "area": area, "bearing": bearing,
+            "range": rng, "est_height": est_height, "aspect": aspect,
+        }
 
     def detect(self):
         out = {"blue": None, "yellow": None, "green": None}
@@ -128,3 +149,80 @@ class PillarDetector:
         out["yellow"] = self._detect_one(hsv, *C.HSV_YELLOW)
         out["green"] = self._detect_one(hsv, *C.HSV_GREEN, min_pixels=200)
         return out
+
+    # ----------------------------- floor mask ---------------------------
+
+    def green_floor_mask(self):
+        """Return the (H, W) bool mask of green pixels in the current frame,
+        or ``None`` if no RGB frame is available.
+
+        Used by the per-pixel poison projector — much more accurate than
+        a single-centroid + fixed-disc model when the floor patch is large
+        or seen from multiple poses."""
+        bgr = self._rgb_array()
+        if bgr is None:
+            return None
+        lo, hi = C.HSV_GREEN
+        if self._cv2 is not None:
+            hsv = self._cv2.cvtColor(bgr, self._cv2.COLOR_BGR2HSV)
+            mask = self._cv2.inRange(
+                hsv, np.array(lo, dtype=np.uint8), np.array(hi, dtype=np.uint8)
+            )
+            return mask > 0
+        hsv = _bgr_to_hsv_numpy(bgr)
+        return _inrange_numpy(hsv, lo, hi) > 0
+
+    # ----------------------------- floor projection ---------------------
+
+    def project_green_floor_to_grid(self, grid, pose, stride=3,
+                                    min_range=0.20, max_range=4.5,
+                                    min_pixels=80):
+        """Project every green pixel to the floor plane and mark each
+        landed cell as poison in ``grid``.
+
+        Uses a flat-floor pinhole model: a pixel ``v`` rows below the
+        principal point sees the ground at distance
+        ``d = CAMERA_MOUNT_Z * f / (v - cy)``. Pixels above the horizon
+        are dropped. A ``stride`` subsamples to keep work bounded.
+
+        Returns the number of cells marked this call (0 if nothing
+        projected, or no green visible).
+        """
+        mask = self.green_floor_mask()
+        if mask is None:
+            return 0
+        H, W = mask.shape
+
+        # Subsample. Skip pixels at/above the horizon — those can't be floor.
+        sub = mask[::stride, ::stride]
+        if int(sub.sum()) < min_pixels // (stride * stride):
+            return 0
+        vs_idx, us_idx = np.nonzero(sub)
+        us = us_idx * stride
+        vs = vs_idx * stride
+        below_horizon = vs > self.cy + 2
+        if not below_horizon.any():
+            return 0
+        us = us[below_horizon].astype(np.float32)
+        vs = vs[below_horizon].astype(np.float32)
+
+        # Pinhole floor projection (z = 0).
+        d = (C.CAMERA_MOUNT_Z * self.fx) / (vs - self.cy)
+        ok = (d > min_range) & (d < max_range)
+        if not ok.any():
+            return 0
+        us = us[ok]
+        vs = vs[ok]
+        d = d[ok]
+
+        # Camera frame -> robot frame: forward = depth, left = -(u - cx)*d/fx.
+        x_r = d
+        y_r = -(us - self.cx) * d / self.fx
+
+        # Robot frame -> world frame.
+        rx, ry, rth = pose
+        c, s = math.cos(rth), math.sin(rth)
+        wx = rx + c * x_r - s * y_r
+        wy = ry + s * x_r + c * y_r
+
+        return grid.mark_poison_points(wx, wy)

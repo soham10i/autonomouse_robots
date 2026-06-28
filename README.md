@@ -21,16 +21,20 @@ pip install -r requirements.txt
 The project is being built in three phases so each piece can be debugged
 on its own.
 
-| Phase | Controller       | What it does                                                                                                                                                                |
-|-------|------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| 1     | `teleop_mapping` | You drive with the arrow keys; lidar + depth + odometry record into a 2D grid and a 3D point cloud. Press `Q` to write `final_map.png`, `scene.ply`, `map.npz`.             |
-| 2     | `auto_explorer`  | Robot drives itself via frontier exploration. Same outputs as Phase 1; pillar positions are recorded but not pursued. Stops when map is saturated or you press `Q`.         |
-| 3     | `maze_navigator` | A* planner + pure-pursuit follower goes for blue → yellow with poison veto. Can either map on the fly or load a Phase-1/2 `map.npz` (Phase 3 task).                          |
+| Phase | Controller        | What it does                                                                                                                                                                |
+|-------|-------------------|-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| 1     | `teleop_mapping`  | Manual mapping only. Arrow keys drive; lidar + depth + odom record into a 2D grid + 3D cloud. `Q` finalises.                                                                |
+| 2     | `auto_explorer`   | Frontier-based autonomous mapping (still rough — see notes). Same outputs as Phase 1; pillar positions are *recorded* but not pursued.                                       |
+| 3     | `path_runner`     | Loads a saved `map.npz`, runs A* `start → BLUE → YELLOW` with poison veto. Use when you have a pre-recorded map.                                                            |
+| 3     | `map_runner`      | Loads `scene.ply` for **crisp wall reconstruction** (height filter + morph close + open) plus `map.npz` for pillars/poison. Plans both legs offline, executes open-loop with motors + encoders + IMU only — LiDAR / camera / IR are disabled for sim speed.  |
+| **1+3** | **`teleop_mission`** | **Recommended.** Drive manually until both pillars are seen, press **M**, the bot then runs A* autonomously to BLUE then YELLOW using the just-built map.               |
+| 3+    | `maze_navigator`  | (Legacy hybrid) Maps on the fly *and* runs the mission in one process. Kept around for experiments.                                                                          |
 
 Switch which controller a world uses by editing the `controller "..."`
 field in `Maze1/worlds/Maze1.wbt` (≈ line 36) or the matching line in
 `Maze2/worlds/Maze2.wbt`. Allowed values: `teleop_mapping`,
-`auto_explorer`, `maze_navigator`.
+`auto_explorer`, `path_runner`, `map_runner`, `teleop_mission`,
+`maze_navigator`.
 
 ## Run
 
@@ -98,10 +102,184 @@ the real name in the per-index listing.
    `map.npz` is binary-compatible with the Phase-1 file, so Phase 3 will
    accept either as input.
 
-### Phase 3 — pillar mission (autonomous)
+### Phase 1 + 3 combined — `teleop_mission` (recommended)
 
-Set the world's controller back to `maze_navigator` and run. Runtime
-artifacts go to `Maze1/controllers/maze_navigator/maps/`:
+This is the simplest end-to-end demo. You drive the bot manually until
+the camera has seen both pillars, then press **M** and the bot runs
+A* shortest-path autonomously to BLUE → YELLOW.
+
+1. Set the world's controller to `teleop_mission`.
+2. Click **Run**. The startup banner prints the controls:
+
+   ```
+   Up / Down    : drive forward / reverse
+   Left / Right : turn
+   Space        : emergency stop
+   M            : switch to autonomous BLUE→YELLOW
+   Q            : finalise + quit
+   ```
+3. Drive around the maze. Watch the periodic log line:
+   ```
+   [t= 14.30s state=TELEOP    ] pose=(...) B=(+2.45,+0.84) Y=? poison=83
+   ```
+   You're looking for **both** `B=(...)` and `Y=(...)` to be set, and the
+   `poison` count to be in the dozens (not thousands — see "common
+   gotchas" below).
+4. Once both pillars show coordinates and you've covered the corridors
+   between them, press **M**:
+   ```
+   [mission] M pressed — switching to autonomous
+   [fsm] TELEOP -> TRANSITION
+   [fsm] TRANSITION -> GO_BLUE
+   [mission] BLUE leg planned: standoff=(+2.00, +0.65) len=8 pts ≈ 2.91 m
+   ```
+5. The bot drives itself to BLUE, pauses ~1 s, then plans + drives to
+   YELLOW. On reaching YELLOW it transitions to `DONE` and stops. Live
+   mapping continues until you press **Q**.
+6. **Q** finalises and writes:
+   * `final_map.png` — full map + trajectory + pillar markers
+   * `scene.ply` — 3D point cloud
+   * `map.npz` — re-usable binary map
+   * `mission_log.txt` — leg timings and path lengths
+   * `mission_NNNN.png` — live snapshots from each second of the run
+
+If the bot can't reach a pillar:
+
+* `[mission] FAILED to plan to ... pillar at ...` — the saved map has no
+  free path. Either the pillar position is wrong (drive a little closer
+  during teleop to refine the running mean) or the corridor between
+  start and pillar wasn't mapped (drive through it during teleop).
+* `[mission] recovery chain exhausted — abandoning` — a real obstacle
+  is blocking the path even after recovery. Press Q, fix mapping, retry.
+
+**Common gotchas during teleop**
+
+* **Don't drive over the green patch.** The per-pixel poison projection
+  marks every green pixel under the camera as lethal — driving on top
+  of it accumulates a huge poison region that blocks A*. Drive around
+  it; the camera can still see the patch from the side.
+* **See each pillar from at least two angles.** The running mean over
+  the last `PILLAR_OBS_AVG_N` (= 8) detections is more accurate when
+  fed from different viewpoints.
+* **Cover all corridors.** A* needs a continuous chain of free cells
+  between start and each pillar. If the planner says NO PATH, the
+  bot's mapping has gaps.
+
+### Phase 3 — `map_runner` (open-loop, scene.ply + map.npz)
+
+This controller is **open-loop after planning**: it parses the offline
+map products, plans both legs of the mission once at startup, then
+executes them via a queue of pure ROTATE / TRANSLATE primitives using
+only motors + wheel encoders + IMU. LiDAR, RGB camera, depth camera,
+and IR rangefinders are **all disabled** during execution → noticeably
+faster sim wall-clock.
+
+Wall reconstruction
+```
+scene.ply → height filter (z ∈ [0.05, 1.50] m) → 2D bin → threshold
+   → morphological CLOSE (fill gaps) → morphological OPEN (drop noise)
+   → unioned with map.npz "occupied" (lidar log-odds threshold) and
+     "aux_obstacle" (depth-cam projection during teleop)
+   → final crisp wall mask
+```
+
+Pillars (BLUE / YELLOW) and the poison region come from `map.npz`'s
+camera-derived layers — the PLY's RGB is a height-rainbow, not real
+scene colour, so colour-based pillar detection from the cloud isn't
+possible without enriching `clearance.depth_to_world_cloud` to also
+capture per-pixel RGB.
+
+Costmap + planner
+
+* Walls dilated by `INFLATE_CELLS = 3` cells (= 12 cm robot-clearance halo).
+* Poison cells get **weighted cost** (`POISON_COST = 50×`), not lethal —
+  so the planner skirts them but can cross if no other route exists.
+* A* (8-connected, weighted) on the cell-cost map.
+* Ramer-Douglas-Peucker simplifies each cell-path down to a handful of
+  corners (`RDP_EPSILON_M = 0.06 m`).
+
+Open-loop primitives
+
+* `ROTATE(Δθ)`: spins until the IMU yaw has accumulated Δθ within ±2°.
+* `TRANSLATE(Δd)`: drives forward at 0.12 m/s until encoder odometry
+  reports Δd within ±2 cm.
+
+Run it:
+
+1. Make sure `Maze1/controllers/teleop_mapping/maps/` has both `scene.ply`
+   and `map.npz` from a prior teleop pass.
+2. Set the world's controller to `map_runner`.
+3. Click **Run**. The plan + instructions are printed before the bot
+   moves at all:
+   ```
+   [plan] PLY-derived walls: 1411 cells
+   [plan] occ=2108  aux=2099  poison=3097  ply_walls=1411
+   [plan] BLUE   pillar @ (+2.46, +0.44)
+   [plan] YELLOW pillar @ (+0.78, -0.85)
+   [plan] A*  start → BLUE  (poison cost = 50.0×)
+   [plan] ✓ 12 waypoints, ≈3.89 m
+        START → BLUE
+       1. ROTATE  +53.13°  (LEFT)
+       2. DRIVE    0.20 m
+       …
+   ```
+4. The bot executes both legs and writes `mission_log.txt` + an
+   annotated `final_map.png` showing both A* paths.
+
+Override the input file paths via env vars if needed:
+
+```bash
+MAP_RUNNER_PLY=/path/to/scene.ply MAP_RUNNER_NPZ=/path/to/map.npz ./run_webots.sh
+```
+
+### Phase 3 — pillar mission on a saved map
+
+Pre-requisite: a `map.npz` from Phase 1 (`teleop_mapping`) or Phase 2
+(`auto_explorer`). The map should have **both pillar positions** baked
+in. Confirm via:
+
+```bash
+env/bin/python3 tools/inspect_map.py Maze1/controllers/teleop_mapping/maps/map.npz
+```
+
+Look for `[CONFIRMED]` (best) or `[seen-only]` next to each pillar.
+"NOT SEEN" means the bot never saw that pillar during mapping — re-run
+mapping with that area covered.
+
+To run:
+
+1. Set the world's controller to `path_runner`.
+2. Click **Run**. The controller:
+   * loads `map.npz` (resolution order: `$PATH_RUNNER_MAP` → controller-local
+     `maps/map.npz` → teleop's → auto_explorer's),
+   * cleans the saved poison + aux layers (morphological opening +
+     connected-component filter to drop drift speckles),
+   * spins briefly to seed the live grid,
+   * plans **start → BLUE** with A* + standoff goal selection,
+   * follows with the SmoothDriver (VFH gap-finder),
+   * pauses at the BLUE standoff, then plans **BLUE → YELLOW**,
+   * announces each leg's planned length and arrival time.
+3. Press **Q** at any time to abort and finalise.
+4. Outputs are written to `Maze1/controllers/path_runner/maps/`:
+   * `mission_NNNN.png` snapshots (live grid + planned path).
+   * `final_mission_map.png` — clean trajectory + pillar markers.
+   * `mission_log.txt` — start/blue/yellow timestamps, leg lengths.
+
+If poison over-marking blocks all routes (pre-Phase-2 maps with the
+old per-pixel projection often had this issue):
+
+```bash
+PATH_RUNNER_DISABLE_POISON=1 ./run_webots.sh
+```
+
+This skips the saved poison layer entirely and relies on live
+re-detection during the mission.
+
+### Phase 3+ legacy — `maze_navigator`
+
+Set the world's controller back to `maze_navigator` and run. This
+controller maps + runs the mission in one process (no `map.npz` reload).
+Runtime artifacts go to `Maze1/controllers/maze_navigator/maps/`:
 
 | File                        | What it is                                       |
 |-----------------------------|--------------------------------------------------|

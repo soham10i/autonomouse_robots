@@ -86,6 +86,29 @@ class Grid2D:
                 v = L[tx, ty] + C.L_OCC
                 L[tx, ty] = v if v < C.L_MAX else C.L_MAX
 
+    def integrate_free(self, pose, end_world):
+        """Update log-odds: mark line as free, DO NOT mark endpoint as occupied."""
+        if end_world.shape[0] == 0:
+            return
+        rx, ry, _ = pose
+        sx, sy = self.w2i(rx, ry)
+        ix_arr, iy_arr, mask = self.world_to_idx_arr(end_world[:, 0], end_world[:, 1])
+        ix_arr = ix_arr[mask]
+        iy_arr = iy_arr[mask]
+        if ix_arr.size == 0:
+            return
+
+        self._dirty = True
+        L = self.L
+        cells = self.cells
+        for tx, ty in zip(ix_arr.tolist(), iy_arr.tolist()):
+            line = bresenham(sx, sy, tx, ty)
+            # mark ALL points on the line as free (including endpoint)
+            for fx, fy in line:
+                if 0 <= fx < cells and 0 <= fy < cells:
+                    v = L[fx, fy] + C.L_FREE
+                    L[fx, fy] = v if v > C.L_MIN else C.L_MIN
+
     # ----------------------------- aux depth ----------------------------
 
     def mark_aux_obstacle_points(self, pts_world_xy):
@@ -121,6 +144,28 @@ class Grid2D:
             return False
         return bool(self.poison[ix, iy])
 
+    def mark_poison_points(self, wx_arr, wy_arr):
+        """Vectorised single-cell poison marking.
+
+        Used by the per-pixel green-floor projector — every green pixel
+        contributes one cell, so the marked region matches the actual
+        floor patch outline instead of a fat disc around the centroid.
+
+        Returns the number of newly added cells (after in-bounds
+        filtering)."""
+        if wx_arr is None or len(wx_arr) == 0:
+            return 0
+        ix, iy, m = self.world_to_idx_arr(np.asarray(wx_arr), np.asarray(wy_arr))
+        ix = ix[m]
+        iy = iy[m]
+        if ix.size == 0:
+            return 0
+        before_total = int(self.poison.sum())
+        self.poison[ix, iy] = True
+        after_total = int(self.poison.sum())
+        self._dirty = True
+        return after_total - before_total
+
     # ----------------------------- forced occ ---------------------------
 
     def mark_inflation(self, wx, wy, radius=0.30):
@@ -136,6 +181,22 @@ class Grid2D:
                     if self.in_bounds(ix, iy):
                         self.L[ix, iy] = C.L_MAX
         self._dirty = True
+
+    # ----------------------------- aux decay ------------------------------
+
+    def clear_aux_where_free(self):
+        """Remove aux_obstacle marks wherever the lidar says the cell is free.
+
+        Depth-camera aux_obstacle is write-once (never cleared). Over time this
+        accumulates stale marks behind walls the bot has moved past, creating
+        impassable 'ghost walls'. Calling this periodically lets lidar evidence
+        override stale depth marks so corridors stay navigable.
+        """
+        free = self.free_mask()
+        cleared = self.aux_obstacle & free
+        if cleared.any():
+            self.aux_obstacle[cleared] = False
+            self._dirty = True
 
     # ----------------------------- masks --------------------------------
 

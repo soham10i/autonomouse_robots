@@ -82,7 +82,10 @@ class Recovery:
         t = sim_time - self.t0
         if self.phase == "REVERSE":
             if t < C.RECOVERY_REVERSE_T:
-                return -0.12, 0.0, False
+                # Speed pulled from config (was hardcoded -0.12). With the
+                # tuned 0.20 m/s × 1.4 s = 28 cm reverse, the bot reliably
+                # clears a corner-wedge before the spin phase starts.
+                return -C.RECOVERY_REVERSE_V, 0.0, False
             self.phase = "SPIN"
             self.t0 = sim_time
             return 0.0, 0.0, False

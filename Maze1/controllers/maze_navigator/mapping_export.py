@@ -67,8 +67,10 @@ def export_final_png(path, grid, pose_history=None, pillar_positions=None,
     Falls back to a no-op on missing matplotlib so the controller doesn't
     crash on minimal Python installs."""
     try:
+        # pyrefly: ignore [missing-import]
         import matplotlib
         matplotlib.use("Agg")
+        # pyrefly: ignore [missing-import]
         import matplotlib.pyplot as plt
     except Exception as e:
         print("[export] matplotlib missing, skipping final PNG:", e)
