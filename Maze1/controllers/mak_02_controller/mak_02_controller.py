@@ -42,13 +42,14 @@ from slam.likelihood_field import LikelihoodField
 from slam.scan_matcher import ScanMatcher
 from mapping.lidar_model import LidarModel
 from mapping.depth_model import DepthModel
+from mapping.cloud_map import CloudMap
 from perception.color_detector import ColorDetector
 from perception.pillar_tracker import PillarTracker
 from exploration.frontier import find_frontiers
 from exploration.goal_selection import select_goal
 from exploration.astar import Planner
 from control.pure_pursuit import follow
-from control.local_planner import DWAPlanner, widest_gap_sign
+from control.local_planner import DWAPlanner, widest_gap_bearing
 import viz
 
 
@@ -77,6 +78,13 @@ class Mak02Controller:
         self.scan_body = np.empty((0, 2))   # live lidar in robot frame, per tick
         self._last_aux_world = np.empty((0, 2))   # live depth floating-wall pts
         self._last_aux_t = -1e9
+
+        # 3D voxel cloud map: continuous depth accumulation -> 3D render + an
+        # accurate 2D floating-wall footprint projected into grid.cloud_obs.
+        self.cloud = CloudMap() if S.CLOUD_ENABLED else None
+        self._last_cloud_t = -1e9
+        self._last_cloud_proj_t = -1e9
+        self._blue_3d_done = False
 
         specs = self.io.lidar_specs()
         self.lidar_model = LidarModel(*specs) if specs else None
@@ -125,7 +133,7 @@ class Mak02Controller:
         self.recovery_phase = None
         self.recovery_until = 0.0
         self.recovery_chain = 0
-        self._recovery_spin = S.RECOVERY_SPIN_W   # committed rotation dir in recovery
+        self._recovery_align_target = 0.0   # absolute heading recovery rotates to
         self._anchor_pose = (0.0, 0.0, 0.0)
         self._anchor_time = 0.0
         self._bump_anchor = None        # (pose, time) for the virtual bumper
@@ -233,6 +241,44 @@ class Mak02Controller:
         # Live floating-wall obstacle points for the DWA (immediate avoidance).
         self._last_aux_world = hits
         self._last_aux_t = self.sim_time
+        self._accumulate_cloud(depth)
+
+    def _accumulate_cloud(self, depth):
+        """Fold the depth frame into the 3D voxel cloud (continuous during
+        exploration) and periodically re-project its collision band into the
+        grid's accurate floating-wall layer (grid.cloud_obs)."""
+        if self.cloud is None:
+            return
+        if self.sim_time - self._last_cloud_t >= S.CLOUD_ACCUM_PERIOD_S:
+            pts = self.depth_model.cloud_world(depth, self.corrected)
+            if pts.shape[0]:
+                self.cloud.add_points_world(pts)
+            self._last_cloud_t = self.sim_time
+        # Only publish the projection into the planner when explicitly enabled —
+        # the accumulating cloud has no clearing and otherwise smears the map shut.
+        if (S.CLOUD_OBS_TO_PLANNER
+                and self.sim_time - self._last_cloud_proj_t >= S.CLOUD_PROJECT_PERIOD_S):
+            self._project_cloud_to_grid()
+            self._last_cloud_proj_t = self.sim_time
+
+    def _project_cloud_to_grid(self):
+        """Project collision-band voxels to 2D, drop the cells the lidar already
+        maps as a normal wall (this layer is for floating walls the lidar
+        misses), and publish the result as grid.cloud_obs for the planner."""
+        if self.cloud is None:
+            return
+        mask = self.cloud.project_to_2d(self.grid)
+        if mask.any():
+            occ = self.grid.occupied_mask()
+            n = max(1, S.CLOUD_OBS_BLIND_CELLS)
+            try:
+                from scipy.ndimage import binary_dilation
+                yy, xx = np.ogrid[-n:n + 1, -n:n + 1]
+                near_wall = binary_dilation(occ, structure=(xx * xx + yy * yy) <= n * n)
+            except Exception:
+                near_wall = occ
+            mask &= ~near_wall
+        self.grid.set_cloud_obs(mask)
 
     # --------------------------------------------------------- perception
     def _perception_step(self):
@@ -251,9 +297,8 @@ class Mak02Controller:
                 br = det["bearing"]
                 gx = x + rng * math.cos(th + br)
                 gy = y + rng * math.sin(th + br)
-                # Pass the measured range so the tracker can DEPTH-CONFIRM the
-                # pillar once the robot is genuinely close (not just glimpsing it
-                # through a floating wall) and snap the estimate to that reading.
+                self.pillars.update(name, gx, gy)
+                # Close-range, consistent views CONFIRM (enable "reached").
                 self.pillars.observe(name, gx, gy, rng)
         # green poison floor projection
         pts = self.color.green_floor_points_world(bgr, self.corrected)
@@ -293,20 +338,14 @@ class Mak02Controller:
         return 0.0, 0.0   # DONE
 
     def _pillar_in_reach(self, name):
-        """True if the pillar is DEPTH-CONFIRMED and the robot is within
-        PILLAR_REACH_DIST of it — the mission target is achieved, regardless of
-        whether we are in EXPLORE or GO.
-
-        Confirmation matters: without it, the robot declared "reached" on
-        odometric distance to a vision estimate that is biased ~0.4 m when the
-        pillar is only seen through/under a floating wall, stopping ~0.8 m short
-        of the real pillar.  ``is_confirmed`` is set only after a clean close
-        depth reading, which also snaps the estimate to the true position — so
-        proximity is now measured against an accurate target."""
-        p = self.pillars.pos.get(name)
-        if p is None or not self.pillars.is_confirmed(name):
+        """True if the pillar is CONFIRMED (seen close & consistent) and the robot
+        is within PILLAR_REACH_DIST of its (close-snapped) position.  Requiring
+        confirmation is what stops the false arrival at a far through-a-gap
+        estimate: the robot must actually drive up to the pillar first."""
+        if not self.pillars.is_confirmed(name):
             return False
-        return pose_distance(self.corrected, p) < S.PILLAR_REACH_DIST
+        p = self.pillars.pos.get(name)
+        return p is not None and pose_distance(self.corrected, p) < S.PILLAR_REACH_DIST
 
     def _maybe_go(self, name, go_state):
         """From an EXPLORE state, switch to ``go_state`` only if the pillar is
@@ -397,9 +436,7 @@ class Mak02Controller:
             return 0.0, 0.0
         if self._go_entry_dist[name] is None:    # start of a GO episode
             self._go_entry_dist[name] = pose_distance(self.corrected, target)
-        # Arrival requires the depth-confirmed reach test (proximity alone let the
-        # robot stop short of a pillar it only saw through a floating wall).
-        if self._pillar_in_reach(name):
+        if self._pillar_in_reach(name):          # confirmed AND within reach
             self._go_entry_dist[name] = None
             self._on_pillar_reached(name)
             return 0.0, 0.0
@@ -450,6 +487,7 @@ class Mak02Controller:
             if self.t_blue is None:
                 self.t_blue = self.sim_time
                 print(f"[mission] BLUE reached at t={self.t_blue:.2f}s", flush=True)
+                self._render_blue_3d()
             self._enter(EXPLORE_YELLOW)
         else:
             if self.t_yellow is None:
@@ -556,18 +594,7 @@ class Mak02Controller:
         fb = self._live_floating_obstacles_body()
         if fb.shape[0]:
             scan = fb if scan.shape[0] == 0 else np.vstack([scan, fb])
-        # Poison gets a wider berth than walls: the DWA hard radius (0.10 m,
-        # inscribed) is smaller than the circumscribed footprint (0.125 m), so at
-        # 0.10 m a corner would overlap a poison cell == mission failure.  Dilate
-        # poison by LP_POISON_EXTRA_CELLS so its effective clearance >= footprint.
-        poison = self.grid.poison
-        if S.LP_POISON_EXTRA_CELLS > 0 and poison.any():
-            try:
-                from scipy.ndimage import binary_dilation
-                poison = binary_dilation(poison, iterations=S.LP_POISON_EXTRA_CELLS)
-            except Exception:
-                pass
-        mask = self.grid.depth_obs_mask() | poison | self.grid.barrier
+        mask = self.grid.depth_obs_mask() | self.grid.poison | self.grid.barrier
         if not mask.any():
             return scan
         ix, iy = np.where(mask)
@@ -621,14 +648,6 @@ class Mak02Controller:
             self._bump_anchor = (self.corrected, self.sim_time)
             return
         if (self.sim_time - atime) > S.BUMPER_STALL_TIME_S:
-            # Only stamp when we trust WHERE we are.  Stamping a permanent barrier
-            # at a mislocalized pose creates a phantom wall that can seal a real
-            # route (the yellow-approach phantom in the certification report).  If
-            # localization is poor, skip the stamp and reset — recovery will
-            # unwedge us, and we'll re-detect the wall once relocalized.
-            if not (self._last_sm_ok and self._last_sm_norm >= S.BUMPER_MIN_SM_NORM):
-                self._bump_anchor = (self.corrected, self.sim_time)
-                return
             x, y, th = self.corrected
             bx = x + S.BUMPER_MARK_AHEAD * math.cos(th)
             by = y + S.BUMPER_MARK_AHEAD * math.sin(th)
@@ -656,61 +675,69 @@ class Mak02Controller:
             return False
         return float(np.min(np.hypot(behind[:, 0], behind[:, 1]))) < S.RECOVERY_REAR_HARD
 
-    def _can_rotate_in_place(self):
-        """True when there is room to spin without a corner scrubbing a wall.
-
-        The robot is ~0.32 m on the diagonal; in a ~0.34 m channel the rotation
-        margin is ~0.04 m, which the 4-wheel skid-steer's rotational scrub eats,
-        swinging a corner into the wall (the user-observed "drifts and hits the
-        wall again on the turn").  So we only allow the turn once the MAP says the
-        nearest wall is >= RECOVERY_ROTATE_CLEAR away — measured from the map, not
-        the lidar, because the trapping wall is usually inside the 0.2 m lidar
-        blind zone."""
-        d = self.grid.nearest_lethal_dist(self.corrected[0], self.corrected[1],
-                                          max_r=S.RECOVERY_ROTATE_CLEAR + 0.10)
-        return d >= S.RECOVERY_ROTATE_CLEAR
-
-    def _rear_lethal_close(self):
-        """True if a wall/poison sits just behind the robot (map probe).  Stops
-        the straight reverse from backing into poison or a wall the rear IR/lidar
-        would miss."""
-        x, y, th = self.corrected
-        bx = x - S.RECOVERY_REAR_PROBE * math.cos(th)
-        by = y - S.RECOVERY_REAR_PROBE * math.sin(th)
-        return self.grid.is_lethal_world(bx, by)
-
     def _do_recovery(self):
-        """Reverse STRAIGHT out of the wedge until there is genuine room to turn,
-        THEN rotate toward the widest open direction — back out the way we came
-        (where the robot is known to fit) to open space, instead of trying to
-        K-turn inside a channel too narrow for the footprint (which scrubs a
-        corner into the wall and re-collides)."""
-        # Phase 1 — reverse until there is room to rotate (or we're blocked/timed
-        # out).  This is the fix for the tight-channel turn-and-re-hit livelock.
+        """Reverse straight out of the wedge, THEN rotate IN PLACE until the head
+        is aligned into the widest open gap, then drive straight.
+
+        The turn no longer spins a fixed time (which over-rotated and swept a
+        corner into a wall) — it rotates only until the heading points at the
+        most open direction the lidar sees, then stops.  This is the user's
+        "rotate on one axis, align the head toward the space, then move", applied
+        in recovery only; normal corridor/corner turns still use the DWA."""
+        # Phase 1 — reverse (skip only if the rear is hard against something).
         if self.recovery_phase == "reverse":
-            keep_reversing = (not self._can_rotate_in_place()
-                              and self.sim_time < self.recovery_until
-                              and not self._rear_hard_blocked()
-                              and not self._rear_lethal_close())
-            if keep_reversing:
+            if self.sim_time < self.recovery_until and not self._rear_hard_blocked():
                 return -S.RECOVERY_REVERSE_V, 0.0
-            # enough room (or can't reverse further) -> rotate toward the open side
-            self.recovery_phase = "spin"
-            self._recovery_spin = widest_gap_sign(self.scan_body) * S.RECOVERY_SPIN_W
-            self.recovery_until = self.sim_time + S.RECOVERY_SPIN_T
-            return 0.0, self._recovery_spin
-        # Phase 2 — rotate toward open space.
-        if self.sim_time < self.recovery_until:
-            return 0.0, self._recovery_spin
-        # done recovering
-        self.plan = None
-        self.expl_goal = None
-        self._reset_anchor()
-        self.state = self.return_state
-        if self.recovery_chain >= S.RECOVERY_MAX_CHAIN:
-            self.blacklist.clear()           # avoid starving exploration
-            self.recovery_chain = 0
+            # finished reversing -> lock the target heading = widest open gap
+            self.recovery_phase = "align"
+            gap = widest_gap_bearing(self.scan_body)        # bearing, robot frame
+            self._recovery_align_target = wrap_angle(self.corrected[2] + gap)
+            self.recovery_until = self.sim_time + S.RECOVERY_ALIGN_MAX_T
+            # fall through into the align phase this tick
+
+        # Phase 2 — rotate in place until the heading faces the open gap.
+        if self.recovery_phase == "align":
+            err = wrap_angle(self._recovery_align_target - self.corrected[2])
+            aligned = abs(err) < S.RECOVERY_ALIGN_TOL
+            if not aligned and self.sim_time < self.recovery_until:
+                w = math.copysign(S.RECOVERY_ALIGN_W, err)
+                return 0.0, w
+            # aligned (or timed out) -> hand back to the seeking state, now facing
+            # open space so the next forward command drives INTO the gap.
+            self.plan = None
+            self.expl_goal = None
+            self._reset_anchor()
+            self.recovery_phase = None
+            self.state = self.return_state
+            if self.recovery_chain >= S.RECOVERY_MAX_CHAIN:
+                self.blacklist.clear()           # avoid starving exploration
+                self.recovery_chain = 0
+            return 0.0, 0.0
         return 0.0, 0.0
+
+    def _render_blue_3d(self):
+        """At blue identification: freshly project the 3D cloud to 2D and dump the
+        3D render + the projected-2D planning map (the user-requested 'render the
+        3D map and convert it to 2D' step before planning blue->yellow)."""
+        if self.cloud is None:
+            return
+        try:
+            self._project_cloud_to_grid()
+            viz.save_ply(os.path.join(self.maps_dir, "scene_blue.ply"), self.cloud)
+            viz.save_cloud_3d_png(
+                os.path.join(self.maps_dir, "cloud3d_blue.png"), self.cloud,
+                pose_history=self.pose_history, pillars=self.pillars.pos,
+                title=f"3D map at BLUE  t={self.sim_time:.1f}s")
+            viz.save_snapshot(
+                os.path.join(self.maps_dir, "proj2d_blue.png"), self.grid,
+                pose=self.corrected, pillars=self.pillars.pos,
+                state_text=f"3D->2D projection @ BLUE  t={self.sim_time:.1f}s\n"
+                           f"cloud voxels={len(self.cloud)} "
+                           f"cloud_obs cells={int(self.grid.cloud_obs.sum())}")
+            print(f"[3d] rendered 3D cloud ({len(self.cloud)} voxels) + 2D "
+                  f"projection at BLUE", flush=True)
+        except Exception as e:
+            print("[3d] blue render failed:", e, flush=True)
 
     # --------------------------------------------------------------- io
     def _maybe_snapshot(self):
@@ -761,6 +788,15 @@ class Mak02Controller:
                          self.pose_history, self.pillars.pos, self.start_pose)
         except Exception as e:
             print("[viz] npz failed:", e, flush=True)
+        if self.cloud is not None:
+            try:
+                viz.save_ply(os.path.join(self.maps_dir, "scene.ply"), self.cloud)
+                viz.save_cloud_3d_png(
+                    os.path.join(self.maps_dir, "cloud3d_final.png"), self.cloud,
+                    pose_history=self.pose_history, pillars=self.pillars.pos,
+                    title="mak_02 final 3D voxel cloud")
+            except Exception as e:
+                print("[viz] 3D export failed:", e, flush=True)
         b = "-" if self.t_blue is None else f"{self.t_blue:.2f}s"
         y = "-" if self.t_yellow is None else f"{self.t_yellow:.2f}s"
         seg = ("-" if (self.t_blue is None or self.t_yellow is None)
@@ -811,10 +847,15 @@ class Mak02Controller:
                           f"{self.corrected[2]:+.2f}) v={v:+.2f} w={w:+.2f} "
                           f"occ={int(self.grid.occupied_mask().sum())} "
                           f"dobs={int(self.grid.depth_obs_mask().sum())} "
+                          f"cobs={int(self.grid.cloud_obs.sum())} "
+                          f"vox={len(self.cloud) if self.cloud else 0} "
                           f"bar={int(self.grid.barrier.sum())} "
                           f"sm={self._last_sm_norm:.2f}{'' if self._last_sm_ok else '!'} "
-                          f"blue={self.pillars.known('blue')} "
-                          f"yellow={self.pillars.known('yellow')}", flush=True)
+                          f"blue={self.pillars.known('blue')}"
+                          f"{'*' if self.pillars.is_confirmed('blue') else ''} "
+                          f"yellow={self.pillars.known('yellow')}"
+                          f"{'*' if self.pillars.is_confirmed('yellow') else ''}",
+                          flush=True)
         except KeyboardInterrupt:
             print("[mak02] interrupted", flush=True)
         finally:

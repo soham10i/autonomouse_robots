@@ -41,6 +41,37 @@ def widest_gap_sign(obstacles_body):
     return 1.0 if lmax >= rmax else -1.0
 
 
+def widest_gap_bearing(obstacles_body, max_range=None):
+    """Return the BEARING (rad, robot frame, +x forward) pointing into the widest
+    open angular gap, given live obstacle points in the robot frame.
+
+    Recovery rotates in place to this bearing so the robot's head ends up facing
+    the most open direction, then drives straight — the user's "rotate on one
+    axis, align the head toward the space, then move".  Only obstacles within
+    ``max_range`` define the gap (far points don't block a turn).  No nearby
+    obstacles => 0.0 (straight ahead is already open).
+    """
+    mr = S.RECOVERY_GAP_MAX_RANGE if max_range is None else max_range
+    o = np.asarray(obstacles_body, dtype=np.float64).reshape(-1, 2)
+    if o.shape[0] == 0:
+        return 0.0
+    rng = np.hypot(o[:, 0], o[:, 1])
+    near = o[rng < mr]
+    if near.shape[0] == 0:
+        return 0.0
+    ang = np.sort(np.arctan2(near[:, 1], near[:, 0]))
+    # gaps between consecutive bearings, including the wrap-around gap
+    diffs = np.diff(ang)
+    wrap = (ang[0] + 2.0 * math.pi) - ang[-1]
+    if wrap >= (diffs.max() if diffs.size else -1.0):
+        center = ang[-1] + 0.5 * wrap
+    else:
+        i = int(np.argmax(diffs))
+        center = ang[i] + 0.5 * diffs[i]
+    # wrap to [-pi, pi]
+    return float((center + math.pi) % (2.0 * math.pi) - math.pi)
+
+
 class DWAPlanner:
     def __init__(self, v_max=None, w_max=None):
         self.v_max = S.V_MAX if v_max is None else v_max

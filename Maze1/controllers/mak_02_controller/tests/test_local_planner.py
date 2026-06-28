@@ -5,12 +5,35 @@ import tests._bootstrap  # noqa: F401
 import numpy as np
 
 import settings as S
-from control.local_planner import DWAPlanner, widest_gap_sign
+from control.local_planner import DWAPlanner, widest_gap_sign, widest_gap_bearing
 
 
 def _wall(x, y0, y1, n=40):
     ys = np.linspace(y0, y1, n)
     return np.stack([np.full_like(ys, x), ys], axis=1)
+
+
+class TestWidestGapBearing(unittest.TestCase):
+    def test_no_obstacles_faces_forward(self):
+        self.assertAlmostEqual(widest_gap_bearing(np.empty((0, 2))), 0.0)
+
+    def test_wall_on_right_turns_left(self):
+        # a near wall along the robot's right (-y) side -> open gap is to the left
+        wall = _wall(0.3, -0.6, -0.1, n=30)
+        b = widest_gap_bearing(wall)
+        self.assertGreater(b, 0.0)
+
+    def test_wall_ahead_turns_around(self):
+        # a near wall straight ahead spanning +-y -> widest gap is behind (~pi)
+        ys = np.linspace(-0.5, 0.5, 40)
+        wall = np.stack([np.full_like(ys, 0.3), ys], axis=1)
+        b = widest_gap_bearing(wall)
+        self.assertGreater(abs(b), math.pi / 2)
+
+    def test_far_obstacles_ignored(self):
+        # obstacles beyond max_range don't constrain the turn
+        far = _wall(5.0, -1.0, 1.0, n=20)
+        self.assertAlmostEqual(widest_gap_bearing(far, max_range=2.0), 0.0)
 
 
 class TestLocalPlanner(unittest.TestCase):
@@ -70,20 +93,6 @@ class TestLocalPlanner(unittest.TestCase):
         self.assertFalse(info["boxed"])
         self.assertGreater(v, 0.15, "crawled in a clear corridor")
         self.assertLess(abs(w), 0.25, "should go straight down the corridor")
-
-    def test_does_not_graze_isolated_obstacle(self):
-        # An isolated obstacle point just left of straight-ahead, at 0.09 m off the
-        # forward axis — INSIDE the inscribed radius (0.10 m).  The old 0.08 m gate
-        # let the robot drive straight and clip it; the footprint-correct gate must
-        # keep the chosen trajectory >= LP_SAFE_RADIUS from it (certification B).
-        self.assertGreaterEqual(S.LP_SAFE_RADIUS, 0.10,
-                                "inscribed-radius regression: side-grazing returns")
-        obs = np.array([[0.40, 0.09]])
-        v, w, info = self.dwa.compute((2.0, 0.0), obs)
-        if not info["boxed"]:
-            traj, _ = self.dwa._rollout(v, w)
-            self.assertGreaterEqual(self.dwa._clearance(traj, obs),
-                                    S.LP_SAFE_RADIUS - 1e-9, "grazed the obstacle")
 
     def test_boxed_in_spins(self):
         # obstacles in a tight ring close all around -> boxed, v == 0

@@ -213,6 +213,25 @@ def main():
     grid2.mark_free_disc(ex, ey, 0.2)
     check("mark_free_disc also clears aux in the footprint", grid2.aux.sum() == 0)
 
+    # depth-vs-lidar reconciliation (the boxed-in bug): a depth hit that lands on
+    # a cell the LIDAR already maps as a wall must NOT be stamped into the aux
+    # layer (else the depth duplicates every normal wall -> aux explodes to the
+    # size of the whole map -> passages choke shut).  A hit in a lidar-BLIND spot
+    # is still kept (genuine low/floating panel).
+    grid3 = OccupancyGrid()
+    wcx, wcy = 0.5 * math.cos(0.0), 0.5 * math.sin(0.0)   # where the hit lands
+    wix, wiy = grid3.world_to_grid(wcx, wcy)
+    grid3.L[wix, wiy] = C.L_MAX                            # lidar already sees a wall here
+    grid3.integrate_aux((0.0, 0.0, 0.0), bearings_one, hit_ranges_one,
+                        np.array([True]), np.array([False]), depth_min=0.05)
+    check("depth hit on an existing lidar wall is NOT duplicated into aux",
+          grid3.aux.sum() == 0)
+    grid4 = OccupancyGrid()                                # no lidar wall anywhere
+    grid4.integrate_aux((0.0, 0.0, 0.0), bearings_one, hit_ranges_one,
+                        np.array([True]), np.array([False]), depth_min=0.05)
+    check("depth hit in a lidar-blind spot is kept (real low panel)",
+          grid4.aux.sum() == 1)
+
     # IR lookup-table inversion round-trips
     table = [0.0, 1000.0, 0.0, 0.5, 100.0, 0.0]   # inverse-linear: close=high val
     lut = ir_lookup.build_lookup(table)

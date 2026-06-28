@@ -64,6 +64,27 @@ class TestDepthModel(unittest.TestCase):
         self.assertEqual(hits.shape[0], 0, "drive-under wall wrongly marked obstacle")
         self.assertGreater(frees.shape[0], 0, "tunnel not cleared")
 
+    def test_cloud_world_backprojects_and_transforms(self):
+        # A full in-band wall straight ahead at 1 m: cloud points sit ~1 m ahead
+        # in the robot frame, then translate with the pose.
+        dm = self._model()
+        depth = np.full((20, 20), 1.0, dtype=np.float32)
+        pts = dm.cloud_world(depth, (2.0, -1.0, 0.0), stride=1,
+                             max_range=5.0, z_min=-1.0, z_max=2.0)
+        self.assertGreater(pts.shape[0], 0)
+        self.assertEqual(pts.shape[1], 3)
+        # forward = +x at 1 m, plus the pose translation (2, -1)
+        self.assertTrue(np.all(np.abs(pts[:, 0] - 3.0) < 1e-3))
+
+    def test_cloud_world_height_band(self):
+        dm = self._model()
+        depth = np.full((20, 20), 1.0, dtype=np.float32)
+        # narrow band that only the centre rows fall into
+        pts = dm.cloud_world(depth, (0.0, 0.0, 0.0), stride=1,
+                             max_range=5.0, z_min=0.15, z_max=0.18)
+        # every kept point must be within the requested z band
+        self.assertTrue(np.all((pts[:, 2] > 0.15) & (pts[:, 2] < 0.18)))
+
 
 if __name__ == "__main__":
     unittest.main()

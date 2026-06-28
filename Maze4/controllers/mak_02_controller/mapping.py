@@ -198,6 +198,16 @@ class OccupancyGrid:
         else:
             idx = np.arange(n_total)
 
+        # The aux layer must hold ONLY obstacles the 2-D lidar is blind to.  The
+        # depth camera also sees the chassis band of normal full-height walls the
+        # lidar already maps; stamping those duplicates the whole wall map into a
+        # lethal layer and boxes the robot in (see config.AUX_LIDAR_BLIND_CELLS).
+        # Reconcile against a dilated lidar-occupied mask: a depth hit is kept
+        # only where no lidar wall sits within AUX_LIDAR_BLIND_CELLS.
+        blind = self.occupied_mask()
+        for _ in range(C.AUX_LIDAR_BLIND_CELLS):
+            blind = _dilate8(blind)
+
         clear_lin = []
         occ_lin = []
         n_cells = self.n
@@ -211,7 +221,7 @@ class OccupancyGrid:
                 ex = pose[0] + rng * math.cos(ang)
                 ey = pose[1] + rng * math.sin(ang)
                 eix, eiy = self.world_to_grid(ex, ey)
-                if self.in_bounds(eix, eiy):
+                if self.in_bounds(eix, eiy) and not blind[eix, eiy]:
                     occ_lin.append(eix * n_cells + eiy)
             elif clear_mask[i]:
                 bearing = float(bearings[i])
@@ -226,6 +236,11 @@ class OccupancyGrid:
         if occ_lin:
             o = np.unique(np.asarray(occ_lin, dtype=np.int64))
             auxflat[o] = True
+        # Retire any EXISTING aux mark the lidar has since confirmed as a normal
+        # wall (clears duplicates stamped before the lidar finished mapping that
+        # wall -- e.g. everything seen during the INIT_SCAN spin).  Genuine
+        # lidar-blind low panels are never in `blind`, so they survive.
+        self.aux &= ~blind
 
     def mark_free_disc(self, wx, wy, radius):
         """Force a small disc around a known-free point to a free log-odds.

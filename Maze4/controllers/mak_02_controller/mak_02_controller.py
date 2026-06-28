@@ -449,6 +449,7 @@ class Mak02Controller:
             self.io.stop()
             self.path = []
             self.dwa.reset()
+            self._reset_progress(t)   # don't inherit stale stuck timer into next state
             self.state = next_state
             return 0.0, 0.0
         # keep the goal/standoff fresh as the estimate refines
@@ -457,7 +458,11 @@ class Mak02Controller:
                 or not self.path or (t - self._last_plan_t()) > C.REPLAN_PERIOD_S):
             path = self._plan_to(goal)
             if path is None:
-                # blocked: fall back to exploring to open a route
+                # Force costmap rebuild and retry once before giving up
+                self._ensure_costmap(t, force=True)
+                path = self._plan_to(goal)
+            if path is None:
+                # truly blocked: fall back to exploring to open a route
                 self.go_fail_until = t + C.GO_FAIL_COOLDOWN_S
                 self.state = (Mission.EXPLORE_BLUE if target == "blue"
                               else Mission.EXPLORE_YELLOW)

@@ -124,15 +124,21 @@ LIDAR_MAX_INTEGRATE = 5.0       # m, do not map endpoints beyond this (keeps map
 # map that does have one).
 AUX_Z_MIN = 0.01                # m above floor -- lowered to catch WallShort(15) at z=0.015
 AUX_Z_MAX = ROBOT_HEIGHT         # m (== 0.22); higher pixels are passable
-AUX_MAX_RANGE = 1.4              # m; drop far/noisy depth pixels (tighter = fewer false aux marks)
+AUX_MAX_RANGE = 1.0              # m; drop far/noisy depth pixels (tighter = fewer false aux marks)
 AUX_CLEAR_MARGIN = 0.05          # m; stop raytrace-clearing this short of a hit
 AUX_COL_SUBSAMPLE = 120          # cap depth-image columns rasterised per tick (speed)
-# Deliberately NO sticky-hit counters, NO decay, NO "reconcile with lidar walls"
-# radius -- this is the root-cause fix for the bug history documented in
-# Maze1/controllers/mak_02_controller/HANDOFF.md ("purple thickening", boxed-in
-# robot): every tick, a clear depth sight-line raytrace-clears the aux cells
-# along it, so a stale mark cannot survive past the next clear reading.  See
-# mapping.OccupancyGrid.integrate_aux().
+# Keep NO sticky-hit counters and NO decay (those were Maze1's "purple
+# thickening" source) -- but the depth layer MUST still be reconciled against
+# the lidar.  The depth camera sees the chassis band of NORMAL full-height walls
+# too, so stamping every depth hit duplicates the ENTIRE lidar wall map into the
+# aux layer (observed: aux grew to ~920 cells, == the whole occ map), thickening
+# every 0.39 m passage into a wall and boxing the robot in -- the depth's 0.6 m
+# MIN RANGE then can't re-clear a wall the robot threads at ~0.19 m, so it never
+# recovers.  Fix (ported from Maze1's _local_obstacles_body): a depth hit becomes
+# an aux obstacle ONLY where the 2-D lidar is genuinely blind -- no lidar-occupied
+# cell within AUX_LIDAR_BLIND_CELLS.  That keeps the real low panels (WallShort
+# 15/16/18) while dropping the duplicate normal-wall marks.
+AUX_LIDAR_BLIND_CELLS = 4        # skip a depth hit within this many cells of a lidar wall
 
 # ===========================================================================
 # Costmap / inflation (planning)
@@ -155,9 +161,9 @@ SIMPLIFY_MAX_COST = 3.5                   # only line-of-sight-shortcut the A* p
                                           # through cells at least this open (~>0.24 m
                                           # clearance); tight gaps keep their dense
                                           # centred path so the carrot tracks centre
-POISON_HARD_DIST = ROBOT_RADIUS + 0.06   # m, keep well clear of poison
-POISON_SOFT_HALO = 0.30                  # m
-COST_POISON_WEIGHT = 60.0
+POISON_HARD_DIST = ROBOT_HALF_WIDTH + 0.02  # m, keep clear of poison (~0.136 m > 0.116 footprint)
+POISON_SOFT_HALO = 0.15                  # m (reduced: old 0.30 choked corridors near poison)
+COST_POISON_WEIGHT = 35.0               # A* can route through costly-but-not-lethal zones near poison
 MIN_GAP_WIDTH = 2 * ROBOT_HALF_WIDTH + 0.03  # ~0.262; gaps narrower than this are impassable
 
 # ===========================================================================
@@ -280,10 +286,13 @@ IR_BUMPER_STOP_DIST = 0.08      # m; any IR below this while moving forward -> v
 # Recovery (stuck handling)
 # ===========================================================================
 STUCK_PROGRESS_MIN_M = 0.07     # m progress expected per window
-STUCK_TIMEOUT_S = 3.0           # s without progress -> recovery
-FROZEN_TIMEOUT_S = 5.0          # s with NO position AND NO heading change in a
+STUCK_TIMEOUT_S = 5.0           # s without progress -> recovery (raised from 3.0:
+                                # old value false-triggered during legitimate frontier
+                                # re-evaluation spins and NO_FRONTIER_SPIN_S rescans)
+FROZEN_TIMEOUT_S = 8.0          # s with NO position AND NO heading change in a
                                 # driving state -> recovery (backstop against any
-                                # v=0,w=0 deadlock, e.g. a latched safety reflex)
+                                # v=0,w=0 deadlock, e.g. a latched safety reflex;
+                                # must be > STUCK_TIMEOUT_S)
 RECOVERY_REVERSE_V = 0.18       # m/s
 RECOVERY_REVERSE_T = 1.2        # s
 RECOVERY_SPIN_W = 1.5           # rad/s
@@ -302,12 +311,12 @@ PILLAR_RADIUS = 0.10            # m
 # Pillars now have explicit height 0.3 m at z=0.15, matching Maze1/Maze5.
 # (Previously buried at z=-0.6 with Webots default 2.0 m height.)
 PILLAR_HEIGHT = 0.30            # m
-PILLAR_MIN_PIXELS = 14          # min coloured blob area
+PILLAR_MIN_PIXELS = 6           # min coloured blob area (lowered: detect at longer range)
 PILLAR_MAX_DETECT_RANGE = 5.0   # m
-PILLAR_HEIGHT_MIN_FRAC = 0.25
+PILLAR_HEIGHT_MIN_FRAC = 0.15   # accept more height variance at long range
 PILLAR_HEIGHT_MAX_FRAC = 2.00
 PILLAR_ASPECT_MAX = 2.2         # reject wide blobs (walls share the colour rarely)
-PILLAR_OBS_AVG_N = 6            # running mean window for world position
+PILLAR_OBS_AVG_N = 3            # running mean window for world position (lowered: confirm faster)
 PILLAR_OUTLIER_REJECT_M = 1.2   # m, discard detections this far from the mean
 PILLAR_CONFIRM_DIST = 0.40      # m, odometry must reach within this to "arrive"
 PILLAR_STANDOFF = 0.42          # m, stop this far short of the pillar centre

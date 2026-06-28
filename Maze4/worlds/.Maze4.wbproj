@@ -7,5 +7,5 @@ centralWidgetVisible: 1
 orthographicViewHeight: 1
 textFiles: -1
 consoles: Console:All:All
-renderingDevicePerspectives: rosbot:camera depth;1;0.121875;0;0
+renderingDevicePerspectives: rosbot:camera depth;1;0.314063;0;0
 renderingDevicePerspectives: rosbot:camera rgb;1;0.18125;0.778196;0

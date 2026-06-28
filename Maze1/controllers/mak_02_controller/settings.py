@@ -66,9 +66,10 @@ WHEEL_ANG_MAX = V_MAX / WHEEL_RADIUS * 1.5   # rad/s saturation per wheel
 # ===========================================================================
 # Occupancy grid (Phase B)
 # ===========================================================================
-GRID_RESOLUTION = 0.04          # m / cell
+GRID_RESOLUTION = 0.025         # m / cell (was 0.04 — finer map: sharper walls,
+                                # accurate floating-wall footprints, better render)
 GRID_SIZE_M = 8.0               # square side length
-GRID_CELLS = int(round(GRID_SIZE_M / GRID_RESOLUTION))   # 200
+GRID_CELLS = int(round(GRID_SIZE_M / GRID_RESOLUTION))   # 320
 GRID_ORIGIN = (-4.0, -4.0)      # world coord of cell (0, 0) lower-left corner
 
 # Log-odds update model.  Free clearing is deliberately close in magnitude to
@@ -166,22 +167,9 @@ SM_FINE_ANG_STEP = math.radians(0.5)     # rad
 # has moved at least this far / turned at least this much since the last update.
 SM_UPDATE_LIN_M = 0.05          # m
 SM_UPDATE_ANG_RAD = math.radians(5.0)    # rad
-# Robust acceptance gate (prevents the "accepted a bad match -> pose jumped" GO_YELLOW
-# stall in the certification report).  The raw score `norm` is the mean likelihood
-# of the matched scan against the map (~fraction of beams landing on walls):
-#   * norm >= SM_TRUST_SCORE_FRAC  -> STRONG, unambiguous match: always accept,
-#     even a large correction (the map clearly explains the scan).
-#   * SM_MIN_SCORE_FRAC <= norm < SM_TRUST_SCORE_FRAC -> MARGINAL/ambiguous (open
-#     areas near the poison block score here): accept ONLY if the correction is
-#     small (<= SM_MARGINAL_MAX_CORR_M), i.e. consistent with odometry.  A
-#     marginal score that also wants to TELEPORT the pose is the failure mode —
-#     reject it and dead-reckon on the (good) wheel+IMU odometry instead.
-#   * norm < SM_MIN_SCORE_FRAC -> LOST: reject, dead-reckon.
-# This is the standard correlative-scan-match outlier rejection (cartographer /
-# gmapping downweight low-confidence matches rather than committing a jump).
-SM_MIN_SCORE_FRAC = 0.40        # below this => lost, dead-reckon (was 0.30)
-SM_TRUST_SCORE_FRAC = 0.60      # at/above this => strong match, accept any correction
-SM_MARGINAL_MAX_CORR_M = 0.10   # m; max correction accepted in the marginal band
+# Reject a match whose best score is implausibly low (likely lost) and fall
+# back to raw odometry for that step.
+SM_MIN_SCORE_FRAC = 0.30        # fraction of beams that must land on a wall
 
 # ===========================================================================
 # Costmap / inflation (planning)
@@ -250,22 +238,9 @@ PP_BIG_HEADING_STOP = 0.6       # rad; above this, spin in place (v=0)
 STUCK_PROGRESS_MIN_M = 0.08     # m of progress expected per window
 STUCK_TIMEOUT_S = 3.0           # s without progress => recovery (was 4.0)
 RECOVERY_REVERSE_V = 0.20       # m/s (was 0.16 — back out of a wedge harder)
-RECOVERY_REVERSE_T = 2.2        # s; MAX straight reverse (=> ~0.44 m).  The
-                                # reverse now stops EARLY once there is room to
-                                # rotate (see RECOVERY_ROTATE_CLEAR), so this is a
-                                # cap that lets the robot back fully out of a tight
-                                # channel before turning instead of K-turning in it.
+RECOVERY_REVERSE_T = 1.5        # s (=> ~0.30 m reverse)
 RECOVERY_SPIN_W = 1.4           # rad/s
 RECOVERY_SPIN_T = 1.0           # s
-# Only rotate in place once the MAP says the nearest wall is at least this far —
-# the robot is ~0.32 m on the diagonal, so in a channel narrower than ~2x this it
-# would scrub a corner into the wall when the skid-steer drift swings it.  Backing
-# out to a spot with this much clearance lets the turn absorb the drift.  Measured
-# from the map (not the lidar — the trapping wall is often inside the 0.2 m lidar
-# blind zone).
-RECOVERY_ROTATE_CLEAR = 0.20    # m; required wall clearance before turning
-RECOVERY_REAR_PROBE = 0.22      # m behind the robot to test for poison/wall when
-                                # reversing (never back into poison or a wall)
 RECOVERY_MAX_CHAIN = 3          # consecutive recoveries before global replan
 RECOVERY_ESCAPE_CLEAR_R = 0.25  # m; on repeated recovery, wipe aux this far
                                 # around the (freely-spinning) robot to break out
@@ -279,6 +254,16 @@ RECOVERY_REAR_MIN_CLEAR = 0.15  # m (legacy; recovery now reverses unless the re
 RECOVERY_REAR_HARD = 0.12       # m; only veto the reverse if something is this
                                 # close directly behind (else always back out)
 RECOVERY_REAR_HALF_WIDTH = 0.16 # m, half-width of the rear collision cone
+# Recovery turn = rotate IN PLACE to ALIGN the heading into the widest open gap,
+# then drive straight (the user's "rotate on one axis, face the space, then go").
+# Instead of a fixed-time blind spin, the spin phase targets the gap BEARING and
+# stops once aligned — so it never over-rotates into a wall.  This is recovery /
+# direction-change ONLY; normal corridor/corner turns still use the DWA.
+RECOVERY_ALIGN_TOL = math.radians(12.0)   # rad; "aligned" when heading err below
+RECOVERY_ALIGN_W = 1.2                     # rad/s in-place rotation toward the gap
+RECOVERY_ALIGN_MAX_T = 2.4                 # s; safety cap on the align spin
+RECOVERY_GAP_MAX_RANGE = 2.0               # m; only obstacles nearer than this
+                                           # define the gap to turn toward
 
 # ===========================================================================
 # DWA local planner (the move_base local-planner equivalent)
@@ -292,19 +277,11 @@ LP_V_SAMPLES = 6                # forward-speed samples in [0, V_MAX]
 LP_W_SAMPLES = 21               # angular samples in [-W_MAX, W_MAX] (odd => incl 0)
 LP_HORIZON_S = 1.0              # trajectory rollout horizon (s)
 LP_STEP_S = 0.2                 # rollout integration step (s)
-# Hard reject radius = the robot's INSCRIBED radius (physical half-width, 0.10 m)
-# and == the A* global-plan hard clearance (ROBOT_RADIUS - HARD_OBS_MARGIN =
-# 0.10 m).  Two invariants make this the correct value, NOT a tuning knob:
-#   1. It must be >= the half-width or the robot's SIDES graze walls (the old
-#      0.08 was 2 cm below the half-width => guaranteed side-grazing; this is the
-#      "drives up and touches the wall" bug from the certification report).
-#   2. It must be <= the A* hard clearance or the local planner rejects the very
-#      path A* produced (center cells are 0.10 m clear) -> self-induced stalls.
-# Equality (0.10 == 0.10) satisfies both; the LP_W_CLEAR reward keeps the robot
-# centred when there is room, so it only approaches 0.10 m in genuinely tight
-# passages.  Using the larger circumscribed radius (0.125) would refuse gaps the
-# 0.20 m-wide robot can thread straight, so we keep the inscribed value.
-LP_SAFE_RADIUS = 0.10           # m; inscribed (half-width) radius == A* hard clearance
+# Hard reject radius = the robot's physical half-width (~0.10 m), NOT the
+# conservative circumscribed radius — otherwise DWA refuses to thread narrow
+# passages that A* (hard clearance 0.10 m) happily plans through, and the robot
+# gets stuck.  The LP_W_CLEAR reward still keeps it centred in open space.
+LP_SAFE_RADIUS = 0.08           # m; physical half-width
 LP_CLEAR_CAP = 0.5              # m; clearance reward saturates here
 # Scoring weights: heading drives progress, clearance centres + avoids walls.
 LP_W_HEADING = 1.5              # alignment of final heading toward the carrot
@@ -323,13 +300,6 @@ LP_SUBSAMPLE = 90              # cap lidar points used for clearance (speed)
 # DWA also avoids MAPPED aux/poison cells within this radius (floating walls and
 # poison the live sensors can't see right now), not just the live lidar scan.
 LP_MAPPED_OBS_RADIUS = 1.5     # m
-# Poison is stricter than a wall: the DWA hard radius (0.10 m, inscribed) is
-# SMALLER than the circumscribed footprint (0.125 m), so at 0.10 m the robot's
-# corner would overlap a poison cell == mission failure.  We therefore DILATE the
-# poison contribution to the DWA obstacle set by this many cells (0.04 m each) so
-# the effective poison clearance becomes ~0.14 m >= the footprint radius, matching
-# the A* poison hard clearance (ROBOT_RADIUS - HARD_POISON_MARGIN = 0.145 m).
-LP_POISON_EXTRA_CELLS = 1      # cells of extra berth around poison for the DWA
 
 # ===========================================================================
 # Virtual bumper — learns invisible floating walls from collisions
@@ -343,13 +313,6 @@ BUMPER_MIN_CMD_V = 0.10         # m/s; only arm while actually trying to drive
 BUMPER_MIN_PROGRESS_M = 0.03    # m; less movement than this counts as blocked
 BUMPER_MARK_AHEAD = ROBOT_RADIUS + 0.04   # m ahead of the robot to stamp
 BUMPER_MARK_RADIUS = 0.06       # m radius of the stamped obstacle disc
-# Only stamp a (permanent) barrier when localization is trustworthy.  A bump is
-# detected as "commanding forward but not moving"; if the scan match is poor at
-# that instant the pose itself is suspect, so the stamp would land at the WRONG
-# place — a phantom wall that can permanently seal a real route (the (0.9,-1.1)
-# barrier on the YELLOW approach corridor in the certification report).  When
-# localization is poor we skip the stamp and let recovery unwedge instead.
-BUMPER_MIN_SM_NORM = 0.45       # require this scan-match confidence before stamping
 
 # ===========================================================================
 # Perception — HSV thresholds (OpenCV convention, H in [0,179])
@@ -368,18 +331,6 @@ PILLAR_ASPECT_MAX = 2.5         # reject blobs wider than this (likely a wall)
 PILLAR_OBS_AVG_N = 8            # running-mean window for the world position
 PILLAR_OUTLIER_REJECT_M = 1.5   # m; discard detections this far from the mean
 PILLAR_CONFIRM_DIST = 0.35      # m; odometry must reach within this to "arrive"
-# Depth-verified pillar CONFIRMATION (so the robot only counts a pillar as reached
-# after it has genuinely driven up to it — not after glimpsing it through/under a
-# floating wall from afar with a biased estimate).  The depth camera is blind
-# < 0.6 m, so the closest reliable confirmation band is just above that.  A
-# detection whose depth range is in [MIN, CONFIRM_RANGE] and which agrees with the
-# tracked estimate (within SNAP_TOL) counts as a close confirmation; after
-# CONFIRM_HITS such readings the pillar is confirmed and its estimate is SNAPPED
-# to the accurate close measurement.  Only a confirmed pillar can be "reached".
-PILLAR_CONFIRM_MIN_RANGE = 0.50    # m; floor (depth is blind below ~0.6 anyway)
-PILLAR_DEPTH_CONFIRM_RANGE = 0.95  # m; must see the pillar within this to confirm
-PILLAR_CONFIRM_SNAP_TOL = 0.60     # m; close reading must be this near the estimate
-PILLAR_CONFIRM_HITS = 3            # close readings required before confirming
 
 # ===========================================================================
 # Mission orchestration (main FSM)
@@ -398,3 +349,56 @@ DONE_LINGER_S = 1.0             # s to keep the window open after DONE
 LOG_EVERY_TICKS = 32
 SNAPSHOT_PERIOD_S = 3.0
 OUTPUT_DIRNAME = "maps"
+
+# ===========================================================================
+# 3D voxel cloud map (continuous depth accumulation -> 3D render + 2D projection)
+# ===========================================================================
+# The depth camera is back-projected to a world-frame point cloud every tick and
+# hashed into a sparse voxel grid (one count per voxel).  This serves two jobs:
+#   1. a 3D scene render (PLY + 3D scatter PNG) like the teleop_mapping phase;
+#   2. an ACCURATE 2D floating-wall footprint — projecting the collision-height
+#      voxels straight down gives the true wall outline (a tumbled/tilted slab's
+#      whole surface, accumulated over many views), instead of the one-view thin
+#      "near-face" scan that mapped WallShort(5) ~0.15 m off and wedged the robot.
+CLOUD_ENABLED = True
+CLOUD_VOXEL_M = 0.03            # voxel edge for the 3D accumulation hash
+CLOUD_STRIDE = 6               # subsample the depth image (u,v) for the cloud
+CLOUD_MAX_RANGE = 3.5          # m; drop far/noisy depth from the cloud
+CLOUD_Z_MIN = -0.05            # m; floor for accumulation (full scene render)
+CLOUD_Z_MAX = 1.20            # m; ceiling for accumulation
+CLOUD_ACCUM_PERIOD_S = 0.25    # s; throttle accumulation (every depth frame ~= dt)
+CLOUD_MAX_VOXELS = 600000      # safety cap on stored voxels
+# 3D -> 2D projection (the floating-wall obstacle footprint used for planning).
+# Only voxels in the robot's collision height band project down; voxels purely
+# ABOVE ROBOT_HEIGHT are drive-under passages and are intentionally dropped.
+CLOUD_OBS_Z_MIN = 0.05         # m; above floor noise
+CLOUD_OBS_Z_MAX = ROBOT_HEIGHT # m; at/below chassis top (== 0.22)
+CLOUD_OBS_MIN_HITS = 3         # a voxel needs this many accumulated hits to count
+CLOUD_PROJECT_PERIOD_S = 1.0   # s; re-project the cloud into the 2D obstacle layer
+# Only project floating-wall voxels the LIDAR is blind to: a projected cell is
+# dropped if a lidar-occupied cell is within this many cells (the lidar already
+# maps that normal wall thinly — re-stamping it just over-inflates passages).
+CLOUD_OBS_BLIND_CELLS = 2
+# Whether the cloud projection feeds the PLANNER (lethal/costmap).  The voxel
+# cloud ACCUMULATES and never raytrace-clears, so at fine resolution the per-wall
+# depth smear piles up and walls the robot into phantom obstacles (cobs ran away
+# to ~1870 cells and trapped it).  So the planner uses the self-correcting depth
+# thin-scan layer (depth_L, which marks AND clears) for live floating walls, and
+# the 3D cloud is kept for the render + the blue 3D->2D snapshot ONLY.  Flip to
+# True only once the projection has a clearing/decay mechanism.
+CLOUD_OBS_TO_PLANNER = False
+
+# ===========================================================================
+# Pillar arrival de-bias (stop the false "reached" from a far through-a-gap view)
+# ===========================================================================
+# A pillar seen as a sliver through a gap at long range gives a position estimate
+# biased toward open space — the robot then "arrives" at empty floor.  Fix: a
+# detection only CONFIRMS the pillar (enables "reached") when it is close AND
+# consistent.  Far sightings still refine the running-mean estimate that steers
+# GO navigation, but never flip the confirmed flag — so the robot must physically
+# drive up to the pillar before the mission counts it.  The depth cam is blind
+# below 0.6 m, so the close-confirm band starts just outside that.
+PILLAR_CONFIRM_RANGE_MIN = 0.55   # m
+PILLAR_CONFIRM_RANGE_MAX = 1.10   # m
+PILLAR_CONFIRM_HITS = 3           # consecutive close, consistent views to confirm
+PILLAR_CONFIRM_SNAP_TOL = 0.70    # m; close readings must agree within this

@@ -48,8 +48,30 @@ class OccupancyGrid:
         # the footprint/escape clears wipe).  This is what stops A* from
         # re-routing under a floating wall the dead-end detector already learned.
         self.barrier = np.zeros(shape, dtype=bool)
+        # Accurate floating-wall footprint projected down from the 3D voxel cloud
+        # (mapping.cloud_map.CloudMap.project_to_2d).  Unlike the one-view thin
+        # depth scan, this is the accumulated wall surface collapsed to its true
+        # cell outline — it is unioned into the lethal/costmap layers so the
+        # planner avoids tumbled/tilted floating walls at their real location.
+        self.cloud_obs = np.zeros(shape, dtype=bool)
+        # The cloud projection accumulates without clearing, so it is kept OUT of
+        # the planner by default (render-only) — it ran away and trapped the
+        # robot.  Flip via S.CLOUD_OBS_TO_PLANNER once it has a clearing scheme.
+        self.use_cloud_obs = bool(S.CLOUD_OBS_TO_PLANNER)
 
         self._dirty = True
+
+    # ------------------------------------------------------- cloud obstacle
+    def set_cloud_obs(self, mask):
+        """Replace the cloud-projected floating-wall mask (from CloudMap).
+
+        Cells the robot's own footprint clears (``mark_free_disc``) are kept
+        clear so a stale projection where the robot is standing cannot box it in.
+        """
+        mask = np.asarray(mask, dtype=bool)
+        if mask.shape == self.cloud_obs.shape:
+            self.cloud_obs = mask
+            self._dirty = True
 
     # --------------------------------------------------------------- coords
     def world_to_grid(self, wx, wy):
@@ -369,6 +391,11 @@ class OccupancyGrid:
                     continue
                 self.L[ix, iy] = S.L_MIN
                 self.aux_count[ix, iy] = 0
+                # A cell the robot is physically standing in cannot hold a
+                # floating wall — wipe any (stale/displaced) depth or cloud mark
+                # so a mis-projected slab can never box the robot in on its pose.
+                self.depth_L[ix, iy] = S.DEPTH_L_MIN
+                self.cloud_obs[ix, iy] = False
         self._dirty = True
 
     def clear_aux_disc(self, wx, wy, radius):
@@ -409,41 +436,11 @@ class OccupancyGrid:
         return self.aux_count >= S.AUX_MIN_HITS
 
     def lethal_mask(self):
-        return (self.occupied_mask() | self.depth_obs_mask()
-                | self.poison | self.barrier)
-
-    def is_lethal_world(self, wx, wy):
-        """Cheap point lethal test (wall / floating-wall / poison / barrier).
-
-        Off-map counts as lethal (never reverse off the known map).  Used by the
-        recovery reverse so the robot never backs into poison or a wall."""
-        ix, iy = self.world_to_grid(wx, wy)
-        if not self.in_bounds(ix, iy):
-            return True
-        return bool(self.L[ix, iy] >= S.L_OCC_THRESH
-                    or self.depth_L[ix, iy] >= S.DEPTH_OCC_THRESH
-                    or self.poison[ix, iy] or self.barrier[ix, iy])
-
-    def nearest_lethal_dist(self, wx, wy, max_r=0.5):
-        """Distance (m) from a world point to the nearest lethal cell within
-        ``max_r`` (``inf`` if none).  Windowed so it is cheap to call per tick.
-
-        The recovery uses this to decide whether there is room to ROTATE in place
-        without a corner scrubbing a wall — the trapping walls are frequently
-        inside the 2-D lidar's 0.2 m blind zone, so the live scan can't measure
-        this but the map can."""
-        lethal = self.lethal_mask()
-        ic, jc = self.world_to_grid(wx, wy)
-        n = max(1, int(math.ceil(max_r / self.res)))
-        i0, i1 = max(0, ic - n), min(self.cells, ic + n + 1)
-        j0, j1 = max(0, jc - n), min(self.cells, jc + n + 1)
-        sub = lethal[i0:i1, j0:j1]
-        if not sub.any():
-            return float("inf")
-        ii, jj = np.where(sub)
-        cx = self.origin[0] + (i0 + ii + 0.5) * self.res
-        cy = self.origin[1] + (j0 + jj + 0.5) * self.res
-        return float(np.min(np.hypot(cx - wx, cy - wy)))
+        m = (self.occupied_mask() | self.depth_obs_mask()
+             | self.poison | self.barrier)
+        if self.use_cloud_obs:
+            m = m | self.cloud_obs
+        return m
 
     def occupancy_prob(self):
         return 1.0 - 1.0 / (1.0 + np.exp(self.L))
@@ -470,10 +467,14 @@ class OccupancyGrid:
         try:
             from scipy.ndimage import distance_transform_edt
             obs = self.occupied_mask() | self.depth_obs_mask() | self.barrier
+            if self.use_cloud_obs:
+                obs = obs | self.cloud_obs
             dist_obs = distance_transform_edt(~obs) * self.res
             dist_poi = distance_transform_edt(~self.poison) * self.res
         except Exception:
             obs = self.occupied_mask() | self.depth_obs_mask() | self.barrier
+            if self.use_cloud_obs:
+                obs = obs | self.cloud_obs
             dist_obs = np.where(obs, 0.0, 10.0).astype(np.float32)
             dist_poi = np.where(self.poison, 0.0, 10.0).astype(np.float32)
 
