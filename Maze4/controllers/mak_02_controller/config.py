@@ -161,8 +161,11 @@ SIMPLIFY_MAX_COST = 3.5                   # only line-of-sight-shortcut the A* p
                                           # through cells at least this open (~>0.24 m
                                           # clearance); tight gaps keep their dense
                                           # centred path so the carrot tracks centre
-POISON_HARD_DIST = ROBOT_HALF_WIDTH + 0.02  # m, keep clear of poison (~0.136 m > 0.116 footprint)
-POISON_SOFT_HALO = 0.15                  # m (reduced: old 0.30 choked corridors near poison)
+# Due to camera projection drift, the poison appears closer to walls in the map 
+# than in reality. We drastically reduce the poison threshold to let the robot 
+# squeeze through these artificially blocked gaps without reversing.
+POISON_HARD_DIST = 0.06                  # m, rounds to 2 cells (was 0.12m/3 cells)
+POISON_SOFT_HALO = 0.08                  # m, reduced to prevent choking tight gaps
 COST_POISON_WEIGHT = 35.0               # A* can route through costly-but-not-lethal zones near poison
 MIN_GAP_WIDTH = 2 * ROBOT_HALF_WIDTH + 0.03  # ~0.262; gaps narrower than this are impassable
 
@@ -318,15 +321,13 @@ PILLAR_HEIGHT_MAX_FRAC = 2.00
 PILLAR_ASPECT_MAX = 2.2         # reject wide blobs (walls share the colour rarely)
 PILLAR_OBS_AVG_N = 3            # running mean window for world position (lowered: confirm faster)
 PILLAR_OUTLIER_REJECT_M = 1.2   # m, discard detections this far from the mean
-PILLAR_CONFIRM_DIST = 0.40      # m, odometry must reach within this to "arrive"
-PILLAR_STANDOFF = 0.42          # m, stop this far short of the pillar centre
 GREEN_PROJECT_STRIDE = 3        # subsample factor when projecting green floor
 GREEN_PROJECT_MAX_RANGE = 3.0   # m, drop far (noisy) green projections (keeps map crisp)
 
 # ===========================================================================
 # Mission / logging
 # ===========================================================================
-PILLAR_REACH_DIST = 0.46        # m, mission "reached the pillar" threshold (centre dist)
+PILLAR_REACH_DIST = 0.35        # m, mission "reached the pillar" threshold (centre dist)
 GO_FAIL_COOLDOWN_S = 2.5        # s, after a failed GO, explore this long before retry
 NO_FRONTIER_SPIN_S = 4.0        # s, spin-and-rescan when no frontier is available
 PERCEPTION_EVERY_TICKS = 2      # run colour perception every N ticks

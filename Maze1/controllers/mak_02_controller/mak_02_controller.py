@@ -1,66 +1,53 @@
-r"""mak_02_controller — SLAM + frontier-exploration mission controller.
+"""mak_02_controller — Maze4 frontier-exploration navigation for the ROSbot.
 
-A from-scratch Python port of the gmapping-style frontier-exploration approach
-(github.com/HanwenCao/Frontier_Exploration) adapted to the Webots ROSbot maze:
+Mission (from Modularbeit.pdf): drive from the start to the BLUE pillar, then to
+the YELLOW pillar, in the least simulation time, without touching walls or the
+green poison floor.  No Webots Supervisor is used; the robot localises with
+wheel + IMU odometry refined by a light lidar scan matcher, maps with a 2-D
+lidar log-odds grid, explores with visual frontiers, plans with A*, and drives
+with a DWA local planner on the live lidar (so wall clearance is drift-immune).
 
-* **Phase A — SLAM.**  Wheel+IMU odometry *predicts* each step; a correlative
-  scan matcher *corrects* it against the map's likelihood field before any scan
-  is integrated.  This is what keeps walls thin (the old controller drifted).
-* **Phase B — clean grid.**  Log-odds occupancy with a hit-count-gated, decaying
-  depth-camera layer for floating walls, plus a per-pixel green-poison layer.
-* **Phase C — exploration.**  Frontier detection + utility goal selection +
-  A* + pure-pursuit, wrapped in a mission FSM that visits BLUE then YELLOW.
+Maze4-specific addition vs. the Maze5 baseline: 4 low wall panels are partially
+or fully invisible to the single-plane 2-D lidar (see config.py).  A
+depth-camera-derived "aux" obstacle layer (mapping.OccupancyGrid.aux, built via
+raytrace-clearing, NOT the sticky/decay scheme that caused bugs on Maze1) and
+the chassis IR proximity sensors (close-range hard-stop backstop) cover them.
 
-Mission FSM::
+FSM:  INIT_SCAN -> EXPLORE_BLUE -> GO_BLUE -> EXPLORE_YELLOW -> GO_YELLOW -> DONE
+      (RECOVERY is reachable from any driving state when progress stalls.)
 
-    INIT_SCAN -> EXPLORE_BLUE -> GO_BLUE -> EXPLORE_YELLOW -> GO_YELLOW -> DONE
-                      \__________ RECOVERY __________/   (on stuck)
-
-Run it by setting the Rosbot's ``controller`` field to ``mak_02_controller`` in
-the Webots world.  Press ``Q`` to finalise and write outputs early.
+Run: set the Rosbot node's ``controller`` field to ``mak_02_controller`` (already
+set in Maze4.wbt).  Press 'Q' in the sim to finalise outputs early.
 """
 from __future__ import annotations
 
 import math
 import os
-import sys
-
-# Make sibling packages importable when Webots launches this file directly.
-_HERE = os.path.dirname(os.path.abspath(__file__))
-if _HERE not in sys.path:
-    sys.path.insert(0, _HERE)
 
 import numpy as np
 
-import settings as S
-from geometry import (relative_pose, compose_pose, wrap_angle, transform_points,
-                      inverse_transform_points, pose_distance)
-from hardware.robot_io import RobotIO
-from slam.odometry import Odometry
-from slam.occupancy_grid import OccupancyGrid
-from slam.likelihood_field import LikelihoodField
-from slam.scan_matcher import ScanMatcher
-from mapping.lidar_model import LidarModel
-from mapping.depth_model import DepthModel
-from mapping.cloud_map import CloudMap
-from perception.color_detector import ColorDetector
-from perception.pillar_tracker import PillarTracker
-from exploration.frontier import find_frontiers
-from exploration.goal_selection import select_goal
-from exploration.astar import Planner
-from control.pure_pursuit import follow
-from control.local_planner import DWAPlanner, widest_gap_bearing
-import viz
+import config as C
+import astar
+import frontier as FR
+import local_planner as LP
+from depth_model import DepthModel
+from geometry import (compose_pose, relative_pose, wrap_angle, pose_distance,
+                      transform_points, inverse_transform_points)
+from mapping import LidarModel, OccupancyGrid
+from odometry import Odometry
+from perception import Perception
+from robot_io import RobotIO
+from viz import Visualizer
 
 
-# states
-INIT_SCAN = "INIT_SCAN"
-EXPLORE_BLUE = "EXPLORE_BLUE"
-GO_BLUE = "GO_BLUE"
-EXPLORE_YELLOW = "EXPLORE_YELLOW"
-GO_YELLOW = "GO_YELLOW"
-RECOVERY = "RECOVERY"
-DONE = "DONE"
+class Mission:
+    INIT_SCAN = "INIT_SCAN"
+    EXPLORE_BLUE = "EXPLORE_BLUE"
+    GO_BLUE = "GO_BLUE"
+    EXPLORE_YELLOW = "EXPLORE_YELLOW"
+    GO_YELLOW = "GO_YELLOW"
+    RECOVERY = "RECOVERY"
+    DONE = "DONE"
 
 
 class Mak02Controller:
@@ -68,802 +55,607 @@ class Mak02Controller:
         self.io = RobotIO()
         self.dt = self.io.dt
 
-        self.odom = Odometry()
-        self.grid = OccupancyGrid()
-        self.field = LikelihoodField.from_grid(self.grid)
-        self.matcher = ScanMatcher()
-        self.planner = Planner(self.grid)
-        self.dwa = DWAPlanner()
-        self.pillars = PillarTracker()
-        self.scan_body = np.empty((0, 2))   # live lidar in robot frame, per tick
-        self._last_aux_world = np.empty((0, 2))   # live depth floating-wall pts
-        self._last_aux_t = -1e9
-
-        # 3D voxel cloud map: continuous depth accumulation -> 3D render + an
-        # accurate 2D floating-wall footprint projected into grid.cloud_obs.
-        self.cloud = CloudMap() if S.CLOUD_ENABLED else None
-        self._last_cloud_t = -1e9
-        self._last_cloud_proj_t = -1e9
-        self._blue_3d_done = False
-
         specs = self.io.lidar_specs()
-        self.lidar_model = LidarModel(*specs) if specs else None
-        d = self.io.depth_specs()
-        # depth_specs -> (w, h, fov, dmin, dmax)
-        self.depth_model = (DepthModel(d[0], d[1], d[2], S.CAMERA_MOUNT_Z, d[3], d[4])
-                            if d else None)
-        c = self.io.camera_specs()
-        self.color = ColorDetector(c[0], c[1], c[2], S.CAMERA_MOUNT_Z) if c else None
+        if specs is not None:
+            n_beams, fov, r_min, r_max = specs
+            self.lidar = LidarModel(n_beams, fov, r_min, r_max)
+        else:
+            self.lidar = None
+            print("[mak_02] WARNING: no lidar found")
 
-        print(f"[mak02] lidar specs (n,fov,rmin,rmax) = {specs}", flush=True)
-        print(f"[mak02] camera specs (w,h,fov)        = {c}", flush=True)
-        print(f"[mak02] depth specs (w,h,fov,min,max) = {d}", flush=True)
+        self.grid = OccupancyGrid()
+        self.odom = Odometry()
 
-        # SLAM pose state
-        self.corrected = (0.0, 0.0, 0.0)
-        self.raw_prev = None
-        self.predicted = (0.0, 0.0, 0.0)
-        self.last_sm_pose = (0.0, 0.0, 0.0)
-        self.sm_updates = 0
-        self._last_sm_norm = 0.0       # diagnostic: scan-match score (0..~1)
-        self._last_sm_ok = False       # diagnostic: was the last match accepted
+        cam = self.io.camera_specs()
+        if cam is not None:
+            self.percep = Perception(cam[0], cam[1], cam[2])
+        else:
+            self.percep = None
+            print("[mak_02] WARNING: no camera found")
+
+        dspecs = self.io.depth_specs()
+        if dspecs is not None:
+            dw, dh, dfov, dmin, dmax = dspecs
+            self.depth_model = DepthModel(dw, dh, dfov, depth_min=dmin, depth_max=dmax)
+        else:
+            self.depth_model = None
+            print("[mak_02] WARNING: no depth camera found — low floating panels "
+                  "will rely on the IR bumper only")
+
+        self.dwa = LP.DWAPlanner(ctrl_dt=self.dt)
+        self.viz = Visualizer(self.grid)
+
+        # pose belief (odom frame; absolute world frame is unknown w/o supervisor)
+        self.pose = (0.0, 0.0, 0.0)
+        self._last_raw = None
+        self.start_xy = (0.0, 0.0)
+
+        # mapping bookkeeping
+        self.scan_body = np.empty((0, 2))
+        self.scan_ranges = np.empty((0,))
+        self._pose_at_last_integrate = None
+        self.cost = None
+        self.lethal = None
+        self._last_costmap_t = -1e9
 
         # mission state
-        self.state = INIT_SCAN
-        self.start_pose = None
-        self.scan_rot = 0.0
-        self.expl_goal = None
-        self.plan = None
-        self.plan_goal = None
-        self.last_plan_t = -1e9
-        self.blacklist = []
+        self.state = Mission.INIT_SCAN
+        self.spin_accum = 0.0
+        self._prev_theta_for_spin = None
+        self.path = []                 # current global path (world points)
+        self.goal_world = None
+        self.carrot = None
+        self.frontier_mask = None
+        self.blacklist = []            # failed frontier goals (world)
+        self.go_fail_until = 0.0
+        self.no_frontier_until = 0.0
+        self.cur_v = 0.0
 
-        # timing
-        self.sim_time = 0.0
-        self.tick = 0
+        # stuck / recovery
+        self._progress_ref = None
+        self._progress_ref_t = 0.0
+        self._frozen_ref = None
+        self._frozen_t = 0.0
+        self.recovery_phase = None
+        self.recovery_t0 = 0.0
+        self.recovery_return = Mission.EXPLORE_BLUE
+        self.recovery_chain = 0
+
+        # timing table
+        self.t_start = None
         self.t_blue = None
         self.t_yellow = None
-        self._done_at = None
 
-        # recovery / stuck
-        self.return_state = EXPLORE_BLUE
-        self._go_fail_until = {"blue": 0.0, "yellow": 0.0}  # cooldown after a failed GO
-        self._go_attempts = {"blue": 0, "yellow": 0}        # dead-end fail counter
-        self._go_entry_dist = {"blue": None, "yellow": None}  # dist at GO episode start
-        self.recovery_phase = None
-        self.recovery_until = 0.0
-        self.recovery_chain = 0
-        self._recovery_align_target = 0.0   # absolute heading recovery rotates to
-        self._anchor_pose = (0.0, 0.0, 0.0)
-        self._anchor_time = 0.0
-        self._bump_anchor = None        # (pose, time) for the virtual bumper
+        self.tick = 0
+        self._last_snapshot_t = -1e9
+        self.green_block = False
+        self.ir_block = False
+        self.outdir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                   C.OUTPUT_DIRNAME)
+        os.makedirs(self.outdir, exist_ok=True)
 
-        # io / history
-        self.pose_history = []
-        self._last_snap_t = -1e9
-        self.maps_dir = os.environ.get(
-            "MAZE_MAPPING_OUTPUT_DIR", os.path.join(_HERE, S.OUTPUT_DIRNAME))
-        os.makedirs(self.maps_dir, exist_ok=True)
-
-        # live exploration window (OpenCV/matplotlib; degrades to off)
-        self.live = None
-        try:
-            from live_view import LiveView
-            self.live = LiveView(self.grid)
-        except Exception as e:
-            print("[live] init failed:", e)
-
-        self._banner()
-
-    # ----------------------------------------------------------- startup
-    def _banner(self):
-        print("=" * 64, flush=True)
-        print("mak_02_controller — SLAM + frontier exploration", flush=True)
-        print("FSM: INIT_SCAN -> EXPLORE_BLUE -> GO_BLUE -> "
-              "EXPLORE_YELLOW -> GO_YELLOW -> DONE", flush=True)
-        print(f"outputs -> {self.maps_dir}", flush=True)
-        print("=" * 64, flush=True)
-
-    # -------------------------------------------------------- odom + slam
-    def _odom_and_predict(self):
+    # ===================================================================== #
+    #  Sensing & localisation
+    # ===================================================================== #
+    def _sense(self):
         wl, wr = self.io.read_encoders()
         yaw = self.io.read_yaw()
-        if wl is not None:
-            self.odom.update(wl, wr, yaw, self.dt)
-        raw_now = self.odom.pose()
-        if self.raw_prev is None:
-            self.raw_prev = raw_now
-            rel = (0.0, 0.0, 0.0)
-            # seed corrected heading from the IMU
-            self.corrected = (0.0, 0.0, raw_now[2])
+        self.odom.update(wl, wr, yaw, self.dt)
+        raw = self.odom.pose()
+        if self._last_raw is None:
+            self.pose = raw
+            self._last_raw = raw
         else:
-            rel = relative_pose(self.raw_prev, raw_now)
-            self.raw_prev = raw_now
-        self.predicted = compose_pose(self.corrected, rel)
-        self.scan_rot += abs(rel[2])
+            inc = relative_pose(self._last_raw, raw)
+            self.pose = compose_pose(self.pose, inc)
+            self._last_raw = raw
 
-    def _slam_update_due(self):
-        d = pose_distance(self.predicted, self.last_sm_pose)
-        a = abs(wrap_angle(self.predicted[2] - self.last_sm_pose[2]))
-        return (self.sm_updates == 0) or (d > S.SM_UPDATE_LIN_M) or (a > S.SM_UPDATE_ANG_RAD)
+        if self.lidar is not None:
+            ranges = self.io.read_lidar_ranges()
+            if ranges is not None:
+                self.scan_body, self.scan_ranges = self.lidar.ranges_to_body(ranges)
 
-    def _read_scan(self):
-        """Read the lidar once per tick into the shared robot-frame buffer."""
-        if self.lidar_model is None:
-            self.scan_body = np.empty((0, 2))
-            return
-        ranges = self.io.read_lidar_ranges()
-        if ranges is None:
-            self.scan_body = np.empty((0, 2))
-            return
-        body, _ = self.lidar_model.ranges_to_body(ranges)
-        self.scan_body = body
+    def _moved_enough(self):
+        if self._pose_at_last_integrate is None:
+            return True
+        dx, dy, dth = relative_pose(self._pose_at_last_integrate, self.pose)
+        return (math.hypot(dx, dy) > C.SM_MIN_TRAVEL_M or
+                abs(dth) > C.SM_MIN_TURN_RAD)
 
     def _slam_step(self):
-        """Correct the predicted pose against the map, then integrate the scan."""
-        if not self._slam_update_due():
-            self.corrected = self.predicted        # dead-reckon between updates
+        if self.scan_body.shape[0] == 0 or not self._moved_enough():
             return
-        body = self.scan_body
-        if body.shape[0] < 10:
-            self.corrected = self.predicted
-            return
+        if C.SM_ENABLED:
+            corrected, hit = self.grid.scan_match(self.pose, self.scan_body)
+            self.pose = corrected
+        self.grid.integrate_scan(self.pose, self.scan_body, self.scan_ranges)
+        self.grid.mark_free_disc(self.pose[0], self.pose[1], C.ROBOT_RADIUS * 0.8)
+        self._pose_at_last_integrate = self.pose
 
-        if self.field.n_occupied >= 10:
-            matched, info = self.matcher.match(self.predicted, body, self.field)
-            self.corrected = matched
-            self._last_sm_norm = info["norm"]
-            self._last_sm_ok = info["accepted"]
-        else:
-            self.corrected = self.predicted        # bootstrap: nothing to match to
-
-        world = transform_points(body, *self.corrected)
-        self.grid.integrate_scan(self.corrected, world)
-        self._integrate_depth()
-
-        self.sm_updates += 1
-        self.last_sm_pose = self.corrected
-        if self.sm_updates % S.FIELD_REBUILD_EVERY == 0:
-            self.field.rebuild(self.grid)
-
-    def _integrate_depth(self):
-        """Fold the depth camera into its OWN obstacle layer (mark + raytrace
-        clear).  The lidar never writes there, so floating walls the lidar misses
-        persist, while the depth's own clearing erases stale/false marks."""
-        if self.depth_model is None:
-            return
-        depth = self.io.read_depth()
-        if depth is None:
-            return
-        hits, frees = self.depth_model.depth_rays_world(
-            depth, self.corrected, S.DEPTH_CLEAR_RANGE)
-        self.grid.integrate_depth_rays(self.corrected, hits, frees)
-        # Live floating-wall obstacle points for the DWA (immediate avoidance).
-        self._last_aux_world = hits
-        self._last_aux_t = self.sim_time
-        self._accumulate_cloud(depth)
-
-    def _accumulate_cloud(self, depth):
-        """Fold the depth frame into the 3D voxel cloud (continuous during
-        exploration) and periodically re-project its collision band into the
-        grid's accurate floating-wall layer (grid.cloud_obs)."""
-        if self.cloud is None:
-            return
-        if self.sim_time - self._last_cloud_t >= S.CLOUD_ACCUM_PERIOD_S:
-            pts = self.depth_model.cloud_world(depth, self.corrected)
-            if pts.shape[0]:
-                self.cloud.add_points_world(pts)
-            self._last_cloud_t = self.sim_time
-        # Only publish the projection into the planner when explicitly enabled —
-        # the accumulating cloud has no clearing and otherwise smears the map shut.
-        if (S.CLOUD_OBS_TO_PLANNER
-                and self.sim_time - self._last_cloud_proj_t >= S.CLOUD_PROJECT_PERIOD_S):
-            self._project_cloud_to_grid()
-            self._last_cloud_proj_t = self.sim_time
-
-    def _project_cloud_to_grid(self):
-        """Project collision-band voxels to 2D, drop the cells the lidar already
-        maps as a normal wall (this layer is for floating walls the lidar
-        misses), and publish the result as grid.cloud_obs for the planner."""
-        if self.cloud is None:
-            return
-        mask = self.cloud.project_to_2d(self.grid)
-        if mask.any():
-            occ = self.grid.occupied_mask()
-            n = max(1, S.CLOUD_OBS_BLIND_CELLS)
-            try:
-                from scipy.ndimage import binary_dilation
-                yy, xx = np.ogrid[-n:n + 1, -n:n + 1]
-                near_wall = binary_dilation(occ, structure=(xx * xx + yy * yy) <= n * n)
-            except Exception:
-                near_wall = occ
-            mask &= ~near_wall
-        self.grid.set_cloud_obs(mask)
-
-    # --------------------------------------------------------- perception
     def _perception_step(self):
-        if self.color is None or self.tick % S.PERCEPTION_EVERY_TICKS != 0:
+        if self.percep is None:
             return
         bgr = self.io.read_rgb_bgr()
         if bgr is None:
             return
         depth = self.io.read_depth()
-        dets = self.color.detect_pillars(bgr, depth)
-        x, y, th = self.corrected
-        for name in ("blue", "yellow"):
-            det = dets.get(name)
-            if self.color.is_valid_pillar(det):
-                rng = det["range"]
-                br = det["bearing"]
-                gx = x + rng * math.cos(th + br)
-                gy = y + rng * math.sin(th + br)
-                self.pillars.update(name, gx, gy)
-                # Close-range, consistent views CONFIRM (enable "reached").
-                self.pillars.observe(name, gx, gy, rng)
-        # green poison floor projection
-        pts = self.color.green_floor_points_world(bgr, self.corrected)
-        if pts.shape[0]:
-            self.grid.mark_poison_points(pts[:, 0], pts[:, 1])
+        self.percep.update_pillars(bgr, depth, self.pose)
+        green_world = self.percep.green_floor_world(bgr, self.pose)
+        self.grid.add_poison_points(green_world)
+        self.green_block = self.percep.green_reflex(bgr)
 
-    # ------------------------------------------------------------- mission
-    def _fsm(self):
-        # keep the robot's own cell plannable
-        self.grid.mark_free_disc(self.corrected[0], self.corrected[1],
-                                 S.ROBOT_RADIUS * 0.85)
-        st = self.state
-        if st == INIT_SCAN:
-            return self._do_init_scan()
-        if st == RECOVERY:
-            return self._do_recovery()
-        if st == EXPLORE_BLUE:
-            # Mission success is being WITHIN reach of the pillar — register it in
-            # EXPLORE too, not only in GO.  The robot was physically reaching blue
-            # (0.08 m) while chasing a frontier just beyond it, then livelocking
-            # on top of the pillar because EXPLORE never checked arrival.
-            if self._pillar_in_reach("blue"):
-                self._on_pillar_reached("blue")
-                return 0.0, 0.0
-            r = self._maybe_go("blue", GO_BLUE)
-            return r if r is not None else self._do_explore(EXPLORE_BLUE)
-        if st == GO_BLUE:
-            return self._do_go("blue", GO_BLUE)
-        if st == EXPLORE_YELLOW:
-            if self._pillar_in_reach("yellow"):
-                self._on_pillar_reached("yellow")
-                return 0.0, 0.0
-            r = self._maybe_go("yellow", GO_YELLOW)
-            return r if r is not None else self._do_explore(EXPLORE_YELLOW)
-        if st == GO_YELLOW:
-            return self._do_go("yellow", GO_YELLOW)
-        return 0.0, 0.0   # DONE
+    def _depth_aux_step(self):
+        """Thin-scan the depth image and raytrace-update the aux obstacle layer.
 
-    def _pillar_in_reach(self, name):
-        """True if the pillar is CONFIRMED (seen close & consistent) and the robot
-        is within PILLAR_REACH_DIST of its (close-snapped) position.  Requiring
-        confirmation is what stops the false arrival at a far through-a-gap
-        estimate: the robot must actually drive up to the pillar first."""
-        if not self.pillars.is_confirmed(name):
-            return False
-        p = self.pillars.pos.get(name)
-        return p is not None and pose_distance(self.corrected, p) < S.PILLAR_REACH_DIST
-
-    def _maybe_go(self, name, go_state):
-        """From an EXPLORE state, switch to ``go_state`` only if the pillar is
-        known AND a path to it currently exists (and we're past the post-failure
-        cooldown).  This prevents the EXPLORE<->GO flip-flop when the pillar is
-        known but walled off behind an unmapped/too-narrow passage — instead we
-        keep exploring to open the route.  Returns a ``(v, w)`` command if we
-        switched, else ``None``.
+        See mapping.OccupancyGrid.integrate_aux + the module docstring for why
+        this is hit/clear only (no sticky counters, no decay) — that is the
+        deliberate fix for the bug history documented in Maze1's HANDOFF.md.
         """
-        if not self.pillars.known(name):
+        if self.depth_model is None:
+            return
+        depth = self.io.read_depth()
+        if depth is None:
+            return
+        bearings, hit_ranges, hit_mask, clear_mask = self.depth_model.thin_scan(depth)
+        self.grid.integrate_aux(self.pose, bearings, hit_ranges, hit_mask, clear_mask,
+                                self.depth_model.depth_min)
+
+    def _ir_step(self):
+        """Close-range chassis-IR hard-stop, independent of mapping (last resort
+        for the lowest panel, WallShort(15), which sits below where the depth
+        camera reliably resolves at very close range)."""
+        if not C.IR_BUMPER_ENABLED:
+            self.ir_block = False
+            return
+        ir = self.io.read_ir_m()
+        if not ir:
+            self.ir_block = False
+            return
+        vals = [v for v in ir.values() if np.isfinite(v)]
+        self.ir_block = bool(vals) and min(vals) < C.IR_BUMPER_STOP_DIST
+
+    # ===================================================================== #
+    #  Planning
+    # ===================================================================== #
+    def _ensure_costmap(self, t, force=False):
+        if force or self.cost is None or (t - self._last_costmap_t) >= C.REPLAN_PERIOD_S:
+            self.cost, self.lethal = self.grid.build_costmap()
+            # ---- anti-self-boxing: the robot IS here, so clear its disc ----
+            # The lethal inflation can make the robot's own cell and all
+            # neighbours impassable (e.g. corridor walls within HARD_OBS_DIST
+            # on both sides).  When that happens A* cannot even START and
+            # _select_frontier() returns nothing → permanent spin deadlock.
+            # Fix: force a small disc around the robot to be non-lethal with
+            # finite (high) cost.  The DWA local planner still uses live lidar
+            # for real wall clearance, so safety is preserved.
+            cix, ciy = self.grid.world_to_grid(self.pose[0], self.pose[1])
+            r = 3  # cells (~0.12 m at 0.04 res) — enough for A* to start
+            n = self.grid.n
+            x0, x1 = max(0, cix - r), min(n, cix + r + 1)
+            y0, y1 = max(0, ciy - r), min(n, ciy + r + 1)
+            self.lethal[x0:x1, y0:y1] = False
+            sub = self.cost[x0:x1, y0:y1]
+            np.minimum(sub, C.COST_OBS_WEIGHT * 0.5, out=sub)  # capped, not free
+            self._last_costmap_t = t
+
+    def _plan_to(self, goal_world):
+        if self.cost is None:
             return None
-        if self.sim_time < self._go_fail_until[name]:
+        start = self.grid.world_to_grid(self.pose[0], self.pose[1])
+        goal = self.grid.world_to_grid(goal_world[0], goal_world[1])
+        cells = astar.plan(self.cost, self.lethal, start, goal)
+        if cells is None:
             return None
-        path, _ = self.planner.plan(self.corrected, self.pillars.pos[name])
-        if not path:
-            self._go_fail_until[name] = self.sim_time + S.GO_FAIL_COOLDOWN_S
-            return None
-        self._enter(go_state)
-        self.plan = path                       # reuse the path we just found
-        self.plan_goal = self.pillars.pos[name]
-        self.last_plan_t = self.sim_time
-        return self._do_go(name, go_state)
+        cells = astar.simplify(cells, self.lethal, self.cost)
+        return [self.grid.grid_to_world(ix, iy) for (ix, iy) in cells]
 
-    def _enter(self, state):
-        if self.state != state:
-            print(f"[fsm] {self.state} -> {state}  (t={self.sim_time:.2f}s)", flush=True)
-        self.state = state
-        self.plan = None
-        self.plan_goal = None
-        self.expl_goal = None
-        self._go_entry_dist = {"blue": None, "yellow": None}  # new GO episode
-        self._reset_anchor()
-
-    # --- INIT_SCAN ---
-    def _do_init_scan(self):
-        if self.scan_rot >= S.INITIAL_SCAN_REVS * 2.0 * math.pi:
-            self.start_pose = self.corrected
-            self._enter(EXPLORE_BLUE)
-            return 0.0, 0.0
-        return 0.0, S.INIT_SPIN_W
-
-    # --- EXPLORE ---
-    def _do_explore(self, ret_state):
-        # need a (new) frontier goal?
-        if self.expl_goal is None or self._reached(self.expl_goal):
-            self.expl_goal = self._pick_frontier()
-            self.plan = None
-        if self.expl_goal is None:
-            # No reachable frontier — spin to look around, but STILL run the
-            # stuck-check so a wedged robot recovers instead of freezing here
-            # forever (this branch previously skipped it -> the permanent freeze).
-            self._stuck_check(ret_state)
-            return 0.0, 0.6
-        v, w, failed = self._navigate(self.expl_goal)
-        if failed:
-            self.blacklist.append(self.expl_goal)
-            self.expl_goal = None
-            self._stuck_check(ret_state)
-            return 0.0, 0.6
-        self._stuck_check(ret_state)
-        return v, w
-
-    def _pick_frontier(self):
-        frontiers = find_frontiers(self.grid)
-        if not frontiers:
-            return None
-
-        # Score frontiers by REAL A* path length, not straight-line distance:
-        # this filters out frontiers walled off from the robot (the cause of the
-        # dead-end thrashing) and ranks the reachable ones by true travel cost.
-        def dist_fn(centroid):
-            path, _ = self.planner.plan(self.corrected, centroid)
-            if not path:
-                return None                     # unreachable -> never selected
-            return self.planner.path_length(path)
-
-        best, _ = select_goal(frontiers, self.corrected,
-                              self.start_pose or self.corrected,
-                              blacklist=self.blacklist, dist_fn=dist_fn)
-        return best.centroid_world if best is not None else None
-
-    # --- GO_PILLAR ---
-    def _do_go(self, name, ret_state):
-        explore = EXPLORE_BLUE if name == "blue" else EXPLORE_YELLOW
-        target = self.pillars.pos.get(name)
-        if target is None:                   # lost the estimate; go back to explore
-            self._enter(explore)
-            return 0.0, 0.0
-        if self._go_entry_dist[name] is None:    # start of a GO episode
-            self._go_entry_dist[name] = pose_distance(self.corrected, target)
-        if self._pillar_in_reach(name):          # confirmed AND within reach
-            self._go_entry_dist[name] = None
-            self._on_pillar_reached(name)
-            return 0.0, 0.0
-        v, w, failed = self._navigate(target)
-        if failed:
-            # No route right now — record the (failed) episode and explore to open
-            # a route (or learn a dead-end). Avoids the instant GO<->EXPLORE bounce.
-            self._register_go_failure(name, target)
-            self._enter(explore)
-            return 0.0, 0.6
-        # Stuck mid-GO returns to EXPLORE (NOT GO): otherwise recovery loops
-        # GO->RECOVERY->GO forever and the dead-end GO-suppression — which is only
-        # checked on the EXPLORE->GO transition — never takes effect.
-        self._stuck_check(explore)
-        if self.state == RECOVERY:           # stuck mid-GO == this episode failed
-            self._register_go_failure(name, target)
-        return v, w
-
-    def _register_go_failure(self, name, target):
-        """Count a failed GO episode.  After GO_DEADEND_FAILS with little net
-        approach, back off this approach (cooldown + blacklist the spot) so the
-        robot EXPLORES for a route in from another side instead of ramming the
-        same wall.  We no longer stamp a permanent barrier here — the depth
-        obstacle layer already maps real floating walls into A*, and the big
-        barriers were walling the robot off."""
-        entry = self._go_entry_dist[name]
-        self._go_entry_dist[name] = None
-        cur = pose_distance(self.corrected, target)
-        progress = (entry - cur) if entry is not None else 0.0
-        if progress >= S.GO_DEADEND_PROGRESS_M:
-            self._go_attempts[name] = 0          # genuinely closing in — not stuck
-            self._go_fail_until[name] = self.sim_time + S.GO_FAIL_COOLDOWN_S
-            return
-        self._go_attempts[name] += 1
-        if self._go_attempts[name] < S.GO_DEADEND_FAILS:
-            self._go_fail_until[name] = self.sim_time + S.GO_FAIL_COOLDOWN_S
-            return
-        # Dead-end: stop hammering this approach for a while and explore elsewhere.
-        self._go_attempts[name] = 0
-        self._go_fail_until[name] = self.sim_time + S.GO_DEADEND_COOLDOWN_S
-        self.blacklist.append((self.corrected[0], self.corrected[1]))
-        print(f"[deadend] {name} not reachable from here — backing off & exploring "
-              f"for another route (GO suppressed {S.GO_DEADEND_COOLDOWN_S:.0f}s)",
-              flush=True)
-
-    def _on_pillar_reached(self, name):
-        if name == "blue":
-            if self.t_blue is None:
-                self.t_blue = self.sim_time
-                print(f"[mission] BLUE reached at t={self.t_blue:.2f}s", flush=True)
-                self._render_blue_3d()
-            self._enter(EXPLORE_YELLOW)
-        else:
-            if self.t_yellow is None:
-                self.t_yellow = self.sim_time
-                print(f"[mission] YELLOW reached at t={self.t_yellow:.2f}s", flush=True)
-            self._enter(DONE)
-
-    # --- shared navigation ---
-    def _navigate(self, goal):
-        """Plan (throttled) to ``goal`` and pure-pursuit follow. -> (v, w, failed)."""
-        need = (self.plan is None
-                or self.plan_goal is None
-                or pose_distance(self.plan_goal, goal) > S.WAYPOINT_REACH_TOL
-                or (self.sim_time - self.last_plan_t) > S.PLAN_REPLAN_PERIOD_S)
-        if need:
-            path, _ = self.planner.plan(self.corrected, goal)
-            self.plan = path
-            self.plan_goal = goal
-            self.last_plan_t = self.sim_time
-        if not self.plan:
-            return 0.0, 0.0, True
-
-        # Pure pursuit chooses WHERE to aim (a carrot on the global path); the
-        # DWA local planner decides HOW to get there safely using the live lidar
-        # (obstacle rejection + corridor centring) — the move_base equivalent.
-        cmd = follow(self.corrected, self.plan)
-        if cmd["reached"]:
-            return 0.0, 0.0, False
-        carrot = cmd["target"] or self.plan[-1]
-        carrot_body = inverse_transform_points(
-            np.array([carrot], dtype=float), *self.corrected)[0]
-        obstacles = self._local_obstacles_body()
-        v, w, _ = self.dwa.compute((float(carrot_body[0]), float(carrot_body[1])),
-                                   obstacles)
-        return v, w, False
-
-    def _ir_points_body(self, front_only=True):
-        """IR/ToF readings as (M, 2) obstacle points in the robot frame.
-
-        These fill the 2D lidar's <0.2 m blind zone (its min range), so the DWA
-        stops clipping close corners.  ``front_only`` keeps just the forward
-        pair (the rear pair is used by the rear-collision check instead).
-        """
-        ranges = self.io.read_ranges()
-        pts = []
-        for d, (sx, sy, sth) in zip(ranges, S.RANGE_SENSOR_POSES):
-            if d is None:
-                continue
-            if front_only and abs(sth) > 1.0:      # rear sensors face ~pi
-                continue
-            pts.append((sx + d * math.cos(sth), sy + d * math.sin(sth)))
-        return np.asarray(pts, dtype=float).reshape(-1, 2)
-
-    def _live_floating_obstacles_body(self):
-        """Live depth points that the LIDAR cannot see (floating walls), in the
-        robot frame.  A depth point is kept only if no lidar-occupied cell sits
-        within ``LIVE_FLOATING_BLIND_CELLS`` of it — i.e. the lidar is genuinely
-        blind there.  This is what lets the robot avoid a floating wall it can see
-        without the normal-wall depth double-counting that chokes passages.
-        """
-        aw = self._last_aux_world
-        if aw.shape[0] == 0 or (self.sim_time - self._last_aux_t) >= 0.5:
-            return np.empty((0, 2))
-        rx, ry, _ = self.corrected
-        keep = (aw[:, 0] - rx) ** 2 + (aw[:, 1] - ry) ** 2 < S.LP_MAPPED_OBS_RADIUS ** 2
-        aw = aw[keep]
-        if aw.shape[0] == 0:
-            return np.empty((0, 2))
-        ix, iy, m = self.grid.world_to_grid_arr(aw[:, 0], aw[:, 1])
-        ix, iy, aw = ix[m], iy[m], aw[m]
-        if aw.shape[0] == 0:
-            return np.empty((0, 2))
-        occ = self.grid.occupied_mask()
-        n = S.LIVE_FLOATING_BLIND_CELLS
-        blind = np.ones(aw.shape[0], dtype=bool)
-        c = self.grid.cells
-        for dx in range(-n, n + 1):
-            for dy in range(-n, n + 1):
-                jx = np.clip(ix + dx, 0, c - 1)
-                jy = np.clip(iy + dy, 0, c - 1)
-                blind &= ~occ[jx, jy]
-        aw = aw[blind]
-        if aw.shape[0] == 0:
-            return np.empty((0, 2))
-        return inverse_transform_points(aw, *self.corrected)
-
-    def _local_obstacles_body(self):
-        """Live lidar + forward IR + mapped aux/poison nearby, in the robot frame.
-
-        The lidar can't see floating walls (it passes over/under them) or poison,
-        so the DWA local planner must also respect the cells the SLAM grid has
-        already learned are obstacles — otherwise it drives straight into them.
-        Forward IR adds close-range hits the lidar is blind to (<0.2 m).
-        """
-        scan = self.scan_body
-        ir = self._ir_points_body(front_only=True)
-        if ir.shape[0]:
-            scan = ir if scan.shape[0] == 0 else np.vstack([scan, ir])
-        # Live depth thin-scan, but ONLY the lidar-BLIND points (genuine floating
-        # walls).  Depth also sees the chassis band of NORMAL walls; feeding those
-        # to the DWA double-counts walls the lidar already handles and chokes
-        # narrow passages (the regression).  So we drop any depth point that has a
-        # lidar-occupied cell nearby and keep only the truly invisible obstacles.
-        fb = self._live_floating_obstacles_body()
-        if fb.shape[0]:
-            scan = fb if scan.shape[0] == 0 else np.vstack([scan, fb])
-        mask = self.grid.depth_obs_mask() | self.grid.poison | self.grid.barrier
-        if not mask.any():
-            return scan
-        ix, iy = np.where(mask)
-        wx = self.grid.origin[0] + (ix + 0.5) * self.grid.res
-        wy = self.grid.origin[1] + (iy + 0.5) * self.grid.res
-        rx, ry, _ = self.corrected
-        keep = (wx - rx) ** 2 + (wy - ry) ** 2 < S.LP_MAPPED_OBS_RADIUS ** 2
-        if not keep.any():
-            return scan
-        world = np.stack([wx[keep], wy[keep]], axis=1)
-        mapped_body = inverse_transform_points(world, *self.corrected)
-        if scan.shape[0] == 0:
-            return mapped_body
-        return np.vstack([scan, mapped_body])
-
-    def _reached(self, goal):
-        return pose_distance(self.corrected, goal) < S.GOAL_REACH_TOL
-
-    # --- stuck + recovery ---
-    def _reset_anchor(self):
-        self._anchor_pose = self.corrected
-        self._anchor_time = self.sim_time
-
-    def _stuck_check(self, ret_state):
-        if pose_distance(self.corrected, self._anchor_pose) > S.STUCK_PROGRESS_MIN_M:
-            self._reset_anchor()
-            self.recovery_chain = 0          # real progress -> reset escalation
-            return
-        if (self.sim_time - self._anchor_time) > S.STUCK_TIMEOUT_S:
-            print(f"[recovery] stuck in {self.state}; recovering", flush=True)
-            self.return_state = ret_state
-            self.state = RECOVERY
-            self.recovery_phase = "reverse"
-            self.recovery_until = self.sim_time + S.RECOVERY_REVERSE_T
-            self.recovery_chain += 1
-            if self.expl_goal is not None:
-                self.blacklist.append(self.expl_goal)
-
-    def _virtual_bumper(self, cmd_v):
-        """Learn an invisible floating wall: if we push forward but don't move,
-        stamp a sticky obstacle just ahead so the map routes around it."""
-        if (self.state in (INIT_SCAN, RECOVERY, DONE)
-                or cmd_v < S.BUMPER_MIN_CMD_V):
-            self._bump_anchor = (self.corrected, self.sim_time)
-            return
-        if self._bump_anchor is None:
-            self._bump_anchor = (self.corrected, self.sim_time)
-            return
-        apose, atime = self._bump_anchor
-        if pose_distance(self.corrected, apose) > S.BUMPER_MIN_PROGRESS_M:
-            self._bump_anchor = (self.corrected, self.sim_time)
-            return
-        if (self.sim_time - atime) > S.BUMPER_STALL_TIME_S:
-            x, y, th = self.corrected
-            bx = x + S.BUMPER_MARK_AHEAD * math.cos(th)
-            by = y + S.BUMPER_MARK_AHEAD * math.sin(th)
-            # A physically-confirmed invisible wall is a real obstacle -> stamp a
-            # PERMANENT barrier (the map is lidar-only now; aux is gone).
-            self.grid.mark_barrier_disc(bx, by, S.BUMPER_MARK_RADIUS)
-            print(f"[bumper] invisible obstacle stamped @ ({bx:+.2f},{by:+.2f}) "
-                  f"— replanning around it", flush=True)
-            self.plan = None                 # force a reroute
-            self._bump_anchor = (self.corrected, self.sim_time)
-
-    def _rear_hard_blocked(self):
-        """True only if something is HARD against the back (< RECOVERY_REAR_HARD).
-        Reversing a little is almost always the right move to unwedge, so we only
-        veto it when the rear is genuinely up against a wall."""
-        ranges = self.io.read_ranges()
-        for d, (sx, sy, sth) in zip(ranges, S.RANGE_SENSOR_POSES):
-            if d is not None and abs(sth) > 1.0 and d < S.RECOVERY_REAR_HARD:
+    def _blacklisted(self, wxy):
+        for bx, by in self.blacklist:
+            if math.hypot(wxy[0] - bx, wxy[1] - by) < C.FRONTIER_BLACKLIST_R:
                 return True
-        s = self.scan_body
-        if s.shape[0] == 0:
-            return False
-        behind = s[(s[:, 0] < 0.0) & (np.abs(s[:, 1]) < S.RECOVERY_REAR_HALF_WIDTH)]
-        if behind.shape[0] == 0:
-            return False
-        return float(np.min(np.hypot(behind[:, 0], behind[:, 1]))) < S.RECOVERY_REAR_HARD
+        return False
 
-    def _do_recovery(self):
-        """Reverse straight out of the wedge, THEN rotate IN PLACE until the head
-        is aligned into the widest open gap, then drive straight.
+    def _select_frontier(self):
+        """Pick the best reachable frontier; return (path, goal_world) or (None,None)."""
+        self.frontier_mask = FR.detect_frontier_cells(self.grid, self.lethal)
+        cands = FR.find_frontiers(self.grid, self.lethal, self.pose[:2], self.start_xy)
+        cands = [c for c in cands if not self._blacklisted(c["world"])]
+        if not cands:
+            return None, None
+        # cheapest first: evaluate the closest handful with real A* path length
+        rx, ry = self.pose[0], self.pose[1]
+        cands.sort(key=lambda c: math.hypot(c["world"][0] - rx, c["world"][1] - ry))
+        best = None
+        for c in cands[:7]:
+            path = self._plan_to(c["world"])
+            if path is None:
+                continue
+            plen = self._path_length(path)
+            util = C.UTIL_INFO_W * c["size"] - C.UTIL_DIST_W * plen
+            if best is None or util > best[0]:
+                best = (util, path, c["world"])
+        if best is None:
+            return None, None
+        return best[1], best[2]
 
-        The turn no longer spins a fixed time (which over-rotated and swept a
-        corner into a wall) — it rotates only until the heading points at the
-        most open direction the lidar sees, then stops.  This is the user's
-        "rotate on one axis, align the head toward the space, then move", applied
-        in recovery only; normal corridor/corner turns still use the DWA."""
-        # Phase 1 — reverse (skip only if the rear is hard against something).
+    @staticmethod
+    def _path_length(path):
+        return sum(math.hypot(path[i + 1][0] - path[i][0], path[i + 1][1] - path[i][1])
+                   for i in range(len(path) - 1))
+
+    # ===================================================================== #
+    #  Driving
+    # ===================================================================== #
+    def _extra_obstacles_body(self):
+        """Mapped poison + aux (low-panel) points near the robot, body frame.
+
+        Folded into one array for the DWA local planner — both are static,
+        mapped obstacle sources the live lidar can't (always) see directly.
+        """
+        near_r = C.DWA_SLOWDOWN_DIST + 0.4
+        pw = self.grid.poison_points_near(self.pose[0], self.pose[1], near_r)
+        aw = self.grid.aux_points_near(self.pose[0], self.pose[1], near_r)
+        parts = [a for a in (pw, aw) if a.shape[0] > 0]
+        if not parts:
+            return np.empty((0, 2))
+        world = np.concatenate(parts, axis=0)
+        return inverse_transform_points(world, self.pose[0], self.pose[1], self.pose[2])
+
+    def _drive_to(self, path, v_cap=None):
+        """Carrot + DWA toward the end of ``path``; returns (v, w, near_goal)."""
+        if not path:
+            return 0.0, 0.0, True
+        carrot, near_goal = LP.choose_carrot(path, self.pose, self.cur_v)
+        self.carrot = carrot
+        extra_b = self._extra_obstacles_body()
+        v, w = self.dwa.compute(self.pose, carrot, self.scan_body, extra_b,
+                                green_block=self.green_block, v_cap=v_cap)
+        return v, w, near_goal
+
+    # ===================================================================== #
+    #  Stuck detection & recovery
+    # ===================================================================== #
+    def _reset_progress(self, t):
+        self._progress_ref = (self.pose[0], self.pose[1])
+        self._progress_ref_t = t
+
+    def _is_stuck(self, t):
+        """Pure POSITION watchdog: no translation for STUCK_TIMEOUT_S in a
+        driving state means stuck, regardless of what is currently commanded.
+
+        Maze1's mak_02_controller documents this exact bug under the same
+        name: its no-reachable-frontier branch used to "spin to look around"
+        WITHOUT running the stuck-check, "the permanent freeze" -- because a
+        v=0 in-place rescan spin never satisfies a forward-command gate, and
+        the heading is visibly changing every tick so a frozen-pose backstop
+        keyed on heading ALSO never fires.  Two watchdogs, both blind to the
+        one failure mode that actually happens (spin-only deadlock).  Maze1's
+        fix was to drop the forward-command requirement and key stuck-ness on
+        translation alone; ported here unchanged.
+        """
+        if self._progress_ref is None:
+            self._reset_progress(t)
+            return False
+        moved = math.hypot(self.pose[0] - self._progress_ref[0],
+                           self.pose[1] - self._progress_ref[1])
+        if moved > C.STUCK_PROGRESS_MIN_M:
+            self._reset_progress(t)
+            self.recovery_chain = 0
+            return False
+        return (t - self._progress_ref_t) > C.STUCK_TIMEOUT_S
+
+    def _is_frozen(self, t):
+        """Backstop: True if NEITHER position NOR heading has changed for too long
+        in a driving state (catches any v=0,w=0 deadlock the stuck-check misses
+        because it requires forward command)."""
+        p = (self.pose[0], self.pose[1], self.pose[2])
+        if self._frozen_ref is None:
+            self._frozen_ref, self._frozen_t = p, t
+            return False
+        moved = math.hypot(p[0] - self._frozen_ref[0], p[1] - self._frozen_ref[1])
+        turned = abs(wrap_angle(p[2] - self._frozen_ref[2]))
+        if moved > 0.03 or turned > 0.05:
+            self._frozen_ref, self._frozen_t = p, t
+            return False
+        return (t - self._frozen_t) > C.FROZEN_TIMEOUT_S
+
+    def _enter_recovery(self, t, return_state):
+        self.recovery_return = return_state
+        self.state = Mission.RECOVERY
+        self.recovery_phase = "reverse"
+        self.recovery_t0 = t
+        self.recovery_chain += 1
+        self._frozen_ref = None   # reset the frozen watchdog on entering recovery
+        self.dwa.reset()
+        rear = LP.rear_clearance(self.scan_body, 0.18)
+        if rear < C.RECOVERY_REAR_MIN_CLEAR:
+            self.recovery_phase = "spin"   # no room behind -> spin instead
+        print(f"[recovery] enter ({self.recovery_phase}); rear={rear:.2f}m chain={self.recovery_chain}")
+
+    def _run_recovery(self, t):
         if self.recovery_phase == "reverse":
-            if self.sim_time < self.recovery_until and not self._rear_hard_blocked():
-                return -S.RECOVERY_REVERSE_V, 0.0
-            # finished reversing -> lock the target heading = widest open gap
-            self.recovery_phase = "align"
-            gap = widest_gap_bearing(self.scan_body)        # bearing, robot frame
-            self._recovery_align_target = wrap_angle(self.corrected[2] + gap)
-            self.recovery_until = self.sim_time + S.RECOVERY_ALIGN_MAX_T
-            # fall through into the align phase this tick
-
-        # Phase 2 — rotate in place until the heading faces the open gap.
-        if self.recovery_phase == "align":
-            err = wrap_angle(self._recovery_align_target - self.corrected[2])
-            aligned = abs(err) < S.RECOVERY_ALIGN_TOL
-            if not aligned and self.sim_time < self.recovery_until:
-                w = math.copysign(S.RECOVERY_ALIGN_W, err)
-                return 0.0, w
-            # aligned (or timed out) -> hand back to the seeking state, now facing
-            # open space so the next forward command drives INTO the gap.
-            self.plan = None
-            self.expl_goal = None
-            self._reset_anchor()
-            self.recovery_phase = None
-            self.state = self.return_state
-            if self.recovery_chain >= S.RECOVERY_MAX_CHAIN:
-                self.blacklist.clear()           # avoid starving exploration
-                self.recovery_chain = 0
-            return 0.0, 0.0
+            if (t - self.recovery_t0) < C.RECOVERY_REVERSE_T and \
+               LP.rear_clearance(self.scan_body, 0.18) > C.RECOVERY_REAR_MIN_CLEAR:
+                return -C.RECOVERY_REVERSE_V, 0.0
+            self.recovery_phase = "spin"
+            self.recovery_t0 = t
+        # spin toward the freer side
+        side = LP.freer_side(self.scan_body)
+        if (t - self.recovery_t0) < C.RECOVERY_SPIN_T:
+            return 0.0, side * C.RECOVERY_SPIN_W
+        # done
+        if self.recovery_chain >= C.RECOVERY_MAX_CHAIN and self.goal_world is not None:
+            self.blacklist.append(self.goal_world)   # give up on this goal
+            self.recovery_chain = 0
+        self.path = []
+        self.goal_world = None
+        self._reset_progress(t)
+        self.state = self.recovery_return
         return 0.0, 0.0
 
-    def _render_blue_3d(self):
-        """At blue identification: freshly project the 3D cloud to 2D and dump the
-        3D render + the projected-2D planning map (the user-requested 'render the
-        3D map and convert it to 2D' step before planning blue->yellow)."""
-        if self.cloud is None:
-            return
-        try:
-            self._project_cloud_to_grid()
-            viz.save_ply(os.path.join(self.maps_dir, "scene_blue.ply"), self.cloud)
-            viz.save_cloud_3d_png(
-                os.path.join(self.maps_dir, "cloud3d_blue.png"), self.cloud,
-                pose_history=self.pose_history, pillars=self.pillars.pos,
-                title=f"3D map at BLUE  t={self.sim_time:.1f}s")
-            viz.save_snapshot(
-                os.path.join(self.maps_dir, "proj2d_blue.png"), self.grid,
-                pose=self.corrected, pillars=self.pillars.pos,
-                state_text=f"3D->2D projection @ BLUE  t={self.sim_time:.1f}s\n"
-                           f"cloud voxels={len(self.cloud)} "
-                           f"cloud_obs cells={int(self.grid.cloud_obs.sum())}")
-            print(f"[3d] rendered 3D cloud ({len(self.cloud)} voxels) + 2D "
-                  f"projection at BLUE", flush=True)
-        except Exception as e:
-            print("[3d] blue render failed:", e, flush=True)
+    # ===================================================================== #
+    #  Mission state machine
+    # ===================================================================== #
+    def _maybe_go(self, target, go_state, t):
+        """Switch EXPLORE->GO iff the pillar is known AND an A* path exists now."""
+        pw = self.percep.pillar_world.get(target) if self.percep else None
+        if pw is None or t < self.go_fail_until:
+            return False
+        # throttle the reachability A* so we don't run it every 32 ms tick
+        if (t - getattr(self, "_last_go_try", -1e9)) < 0.4:
+            return False
+        self._last_go_try = t
+        goal = pw
+        path = self._plan_to(goal)
+        if path is None:
+            return False
+        self.path = path
+        self.goal_world = goal
+        self.state = go_state
+        self._reset_progress(t)
+        self.dwa.reset()
+        print(f"[mission] {target} pillar known at "
+              f"({pw[0]:.2f},{pw[1]:.2f}) -> {go_state}")
+        return True
 
-    # --------------------------------------------------------------- io
-    def _maybe_snapshot(self):
-        if (self.sim_time - self._last_snap_t) < S.SNAPSHOT_PERIOD_S:
-            return
-        self._last_snap_t = self.sim_time
-        txt = (f"{self.state}  t={self.sim_time:6.2f}s\n"
-               f"pose=({self.corrected[0]:+.2f},{self.corrected[1]:+.2f},"
-               f"{self.corrected[2]:+.2f})\n"
-               f"occ={int(self.grid.occupied_mask().sum())} "
-               f"sm={self.sm_updates}")
-        try:
-            viz.save_snapshot(
-                os.path.join(self.maps_dir, f"mak02_{int(self.sim_time):04d}.png"),
-                self.grid, pose=self.corrected, path_world=self.plan,
-                goal=self.expl_goal, pillars=self.pillars.pos, state_text=txt)
-        except Exception as e:
-            print("[viz] snapshot failed:", e, flush=True)
+    def _explore(self, target, go_state, t):
+        if self._maybe_go(target, go_state, t):
+            return self._drive_to(self.path)[:2]
+        # (re)select a frontier goal when needed
+        need_new = (not self.path or self.goal_world is None or
+                    pose_distance(self.pose, self.goal_world) < C.GOAL_REACH_TOL or
+                    (t - self._last_plan_t()) > C.REPLAN_PERIOD_S)
+        if need_new:
+            # force a fresh costmap before frontier selection so we plan on the
+            # most up-to-date data (also re-runs the anti-self-boxing disc)
+            self._ensure_costmap(t, force=True)
+            path, goal = self._select_frontier()
+            if path is not None:
+                self.path, self.goal_world = path, goal
+                self._plan_stamp = t
+            else:
+                # nothing to explore: rescan in place for a while
+                if t < self.no_frontier_until:
+                    return 0.0, C.INIT_SPIN_W
+                self.no_frontier_until = t + C.NO_FRONTIER_SPIN_S
+                self.path, self.goal_world = [], None
+                return 0.0, C.INIT_SPIN_W
+        v, w, _ = self._drive_to(self.path)
+        return v, w
 
-    def _maybe_live(self):
-        """Refresh the live exploration window (frontiers + plan + trajectory)."""
-        if self.live is None or not self.live.ok or self.tick % 8 != 0:
+    def _last_plan_t(self):
+        return getattr(self, "_plan_stamp", -1e9)
+
+    def _go(self, target, next_state, t, reached_cb):
+        pw = self.percep.pillar_world.get(target) if self.percep else None
+        if pw is None:
+            self.state = self.recovery_return = (Mission.EXPLORE_BLUE
+                if target == "blue" else Mission.EXPLORE_YELLOW)
+            return 0.0, 0.0
+        # arrival check
+        if pose_distance(self.pose, pw) <= C.PILLAR_REACH_DIST:
+            reached_cb(t)
+            self.io.stop()
+            self.path = []
+            self.dwa.reset()
+            self._reset_progress(t)   # don't inherit stale stuck timer into next state
+            self.state = next_state
+            return 0.0, 0.0
+        # keep the goal fresh as the estimate refines
+        goal = pw
+        if (self.goal_world is None or pose_distance(goal, self.goal_world) > 0.15
+                or not self.path or (t - self._last_plan_t()) > C.REPLAN_PERIOD_S):
+            path = self._plan_to(goal)
+            if path is None:
+                # Force costmap rebuild and retry once before giving up
+                self._ensure_costmap(t, force=True)
+                path = self._plan_to(goal)
+            if path is None:
+                # truly blocked: fall back to exploring to open a route
+                self.go_fail_until = t + C.GO_FAIL_COOLDOWN_S
+                self.state = (Mission.EXPLORE_BLUE if target == "blue"
+                              else Mission.EXPLORE_YELLOW)
+                print(f"[mission] no path to {target}; exploring to open route")
+                return 0.0, 0.0
+            self.path, self.goal_world = path, goal
+            self._plan_stamp = t
+        v, w, near = self._drive_to(self.path, v_cap=C.V_CRUISE)
+        return v, w
+
+    def _reached_blue(self, t):
+        self.t_blue = t
+        print(f"\n*** BLUE pillar reached at t = {t:.2f} s "
+              f"(start->blue = {t - self.t_start:.2f} s) ***\n")
+
+    def _reached_yellow(self, t):
+        self.t_yellow = t
+        print(f"\n*** YELLOW pillar reached at t = {t:.2f} s "
+              f"(blue->yellow = {t - self.t_blue:.2f} s) ***\n")
+
+    def _step_fsm(self, t):
+        st = self.state
+        if st == Mission.INIT_SCAN:
+            if self._prev_theta_for_spin is None:
+                self._prev_theta_for_spin = self.pose[2]
+            self.spin_accum += abs(wrap_angle(self.pose[2] - self._prev_theta_for_spin))
+            self._prev_theta_for_spin = self.pose[2]
+            if self.spin_accum >= C.INITIAL_SCAN_REVS * 2.0 * math.pi:
+                self.state = Mission.EXPLORE_BLUE
+                self._reset_progress(t)
+                print("[mission] initial scan complete -> EXPLORE_BLUE")
+                return 0.0, 0.0
+            return 0.0, C.INIT_SPIN_W
+
+        if st == Mission.EXPLORE_BLUE:
+            return self._explore("blue", Mission.GO_BLUE, t)
+        if st == Mission.GO_BLUE:
+            return self._go("blue", Mission.EXPLORE_YELLOW, t, self._reached_blue)
+        if st == Mission.EXPLORE_YELLOW:
+            return self._explore("yellow", Mission.GO_YELLOW, t)
+        if st == Mission.GO_YELLOW:
+            return self._go("yellow", Mission.DONE, t, self._reached_yellow)
+        if st == Mission.RECOVERY:
+            return self._run_recovery(t)
+        # DONE
+        return 0.0, 0.0
+
+    # ===================================================================== #
+    #  Visualisation / output
+    # ===================================================================== #
+    def _visualize(self, t, force=False):
+        snap = force or (t - self._last_snapshot_t) >= C.SNAPSHOT_PERIOD_S
+        # render live at ~10 Hz (every 3rd tick); always render when snapping
+        if not (snap or force or self.tick % 3 == 0):
             return
-        try:
-            fr = (find_frontiers(self.grid)
-                  if self.state in (EXPLORE_BLUE, EXPLORE_YELLOW) else None)
-            txt = (f"{self.state} t={self.sim_time:.1f}s "
-                   f"occ={int(self.grid.occupied_mask().sum())} sm={self.sm_updates}")
-            self.live.update(self.grid, pose=self.corrected, plan=self.plan,
-                             frontiers=fr, goal=self.expl_goal,
-                             pillars=self.pillars.pos,
-                             traj=self.pose_history[-400:], text=txt)
-        except Exception as e:
-            print("[live] update failed; disabling:", e, flush=True)
-            self.live.ok = False
+        pillars = {k: v for k, v in (self.percep.pillar_world.items()
+                                     if self.percep else [])}
+        img = self.viz.render(self.pose, self.frontier_mask, self.path,
+                              self.carrot, pillars, self.state, t)
+        self.viz.show(img)
+        if snap:
+            self.viz.save(img, os.path.join(self.outdir, "live_map.png"))
+            self._last_snapshot_t = t
+
+    def _print_timing(self):
+        print("\n================ TIMING TABLE ================")
+        if self.t_blue is not None:
+            print(f"  start  -> blue   : {self.t_blue - self.t_start:7.2f} s")
+        else:
+            print("  start  -> blue   :   (not reached)")
+        if self.t_yellow is not None and self.t_blue is not None:
+            print(f"  blue   -> yellow : {self.t_yellow - self.t_blue:7.2f} s")
+            print(f"  TOTAL  (start->yellow): {self.t_yellow - self.t_start:7.2f} s")
+        else:
+            print("  blue   -> yellow :   (not reached)")
+        print("=============================================\n")
 
     def _finalize(self):
-        if self.live is not None:
-            self.live.close()
-        print("[mak02] finalising — writing outputs...", flush=True)
+        self.io.stop()
+        self.io.step()
+        self._ensure_costmap(self.io.time(), force=True)
+        self._visualize(self.io.time(), force=True)
         try:
-            viz.save_final_map(os.path.join(self.maps_dir, "final_map.png"),
-                               self.grid, self.pose_history, self.pillars.pos)
+            self.viz.save(self.viz.render(self.pose, self.frontier_mask, self.path,
+                          self.carrot, {k: v for k, v in (self.percep.pillar_world.items()
+                          if self.percep else [])}, self.state, self.io.time()),
+                          os.path.join(self.outdir, "final_map.png"))
+            np.savez_compressed(os.path.join(self.outdir, "map.npz"),
+                                L=self.grid.L, poison=self.grid.poison, aux=self.grid.aux)
         except Exception as e:
-            print("[viz] final map failed:", e, flush=True)
-        try:
-            viz.save_npz(os.path.join(self.maps_dir, "map.npz"), self.grid,
-                         self.pose_history, self.pillars.pos, self.start_pose)
-        except Exception as e:
-            print("[viz] npz failed:", e, flush=True)
-        if self.cloud is not None:
-            try:
-                viz.save_ply(os.path.join(self.maps_dir, "scene.ply"), self.cloud)
-                viz.save_cloud_3d_png(
-                    os.path.join(self.maps_dir, "cloud3d_final.png"), self.cloud,
-                    pose_history=self.pose_history, pillars=self.pillars.pos,
-                    title="mak_02 final 3D voxel cloud")
-            except Exception as e:
-                print("[viz] 3D export failed:", e, flush=True)
-        b = "-" if self.t_blue is None else f"{self.t_blue:.2f}s"
-        y = "-" if self.t_yellow is None else f"{self.t_yellow:.2f}s"
-        seg = ("-" if (self.t_blue is None or self.t_yellow is None)
-               else f"{self.t_yellow - self.t_blue:.2f}s")
-        print("=" * 64, flush=True)
-        print(f"[mission] start->BLUE : {b}", flush=True)
-        print(f"[mission] BLUE->YELLOW: {seg}", flush=True)
-        print(f"[mission] total       : {y}", flush=True)
-        print("=" * 64, flush=True)
+            print("[mak_02] finalize save error:", e)
+        self._print_timing()
+        self.viz.close()
 
-    # ------------------------------------------------------------- loop
+    # ===================================================================== #
+    #  Main loop
+    # ===================================================================== #
     def run(self):
-        try:
-            while self.io.step() != -1:
-                self.sim_time += self.dt
-                self.tick += 1
+        # prime sensors
+        if self.io.step() == -1:
+            return
+        self._sense()
+        self.start_xy = (self.pose[0], self.pose[1])
+        self.t_start = self.io.time()
+        print(f"[mak_02] start pose (odom) = ({self.pose[0]:.2f},{self.pose[1]:.2f},"
+              f"{math.degrees(self.pose[2]):.1f} deg)")
 
-                self._odom_and_predict()
-                self._read_scan()
-                self._slam_step()
+        while self.io.step() != -1:
+            self.tick += 1
+            t = self.io.time()
+
+            keys = self.io.poll_key()
+            if ord('Q') in keys or ord('q') in keys:
+                print("[mak_02] Q pressed -> finalize")
+                break
+
+            self._sense()
+            self._slam_step()
+            if self.tick % C.PERCEPTION_EVERY_TICKS == 0:
                 self._perception_step()
+            if self.tick % C.DEPTH_AUX_EVERY_TICKS == 0:
+                self._depth_aux_step()
+            self._ir_step()
+            self._ensure_costmap(t)
+            # keep the robot's own cell plannable in the costmap snapshot
+            self.grid.mark_free_disc(self.pose[0], self.pose[1], C.ROBOT_RADIUS * 0.8)
 
-                if self.tick % 5 == 0:
-                    self.pose_history.append(self.corrected)
+            v, w = self._step_fsm(t)
 
-                keys = self.io.poll_key()
-                if ord('Q') in keys or ord('q') in keys:
-                    print("[mak02] Q pressed — finalising.", flush=True)
-                    self.io.stop()
+            # position watchdog applies in every driving state, REGARDLESS of
+            # what is currently commanded (see _is_stuck docstring) -- this is
+            # what catches the no-reachable-frontier rescan spin (v=0, w!=0).
+            driving = self.state in (Mission.EXPLORE_BLUE, Mission.GO_BLUE,
+                                     Mission.EXPLORE_YELLOW, Mission.GO_YELLOW)
+            if driving and (self._is_stuck(t) or self._is_frozen(t)):
+                self._enter_recovery(t, self.state)
+                v, w = 0.0, 0.0
+
+            if self.green_block and v > 0.0:
+                v = 0.0  # hard poison reflex safety net
+            if self.ir_block and v > 0.0:
+                v = 0.0  # hard chassis-IR bumper safety net (low floating panels)
+
+            self.io.set_cmd(v, w)
+            self.cur_v = v
+
+            self._visualize(t)
+            if self.tick % C.LOG_EVERY_TICKS == 0:
+                self._log(t)
+
+            if self.state == Mission.DONE:
+                # linger briefly so the final frame is visible, then stop
+                if not hasattr(self, "_done_t"):
+                    self._done_t = t
+                if t - self._done_t > C.DONE_LINGER_S:
                     break
 
-                v, w = self._fsm()
-                self.io.set_cmd(v, w)
-                self._virtual_bumper(v)
-                self._maybe_snapshot()
-                self._maybe_live()
+        self._finalize()
 
-                if self.state == DONE:
-                    if self._done_at is None:
-                        self._done_at = self.sim_time
-                    elif self.sim_time - self._done_at > S.DONE_LINGER_S:
-                        self.io.stop()
-                        break
-
-                if self.tick % S.LOG_EVERY_TICKS == 0:
-                    print(f"[t={self.sim_time:6.2f}s] {self.state} "
-                          f"pose=({self.corrected[0]:+.2f},{self.corrected[1]:+.2f},"
-                          f"{self.corrected[2]:+.2f}) v={v:+.2f} w={w:+.2f} "
-                          f"occ={int(self.grid.occupied_mask().sum())} "
-                          f"dobs={int(self.grid.depth_obs_mask().sum())} "
-                          f"cobs={int(self.grid.cloud_obs.sum())} "
-                          f"vox={len(self.cloud) if self.cloud else 0} "
-                          f"bar={int(self.grid.barrier.sum())} "
-                          f"sm={self._last_sm_norm:.2f}{'' if self._last_sm_ok else '!'} "
-                          f"blue={self.pillars.known('blue')}"
-                          f"{'*' if self.pillars.is_confirmed('blue') else ''} "
-                          f"yellow={self.pillars.known('yellow')}"
-                          f"{'*' if self.pillars.is_confirmed('yellow') else ''}",
-                          flush=True)
-        except KeyboardInterrupt:
-            print("[mak02] interrupted", flush=True)
-        finally:
-            self._finalize()
+    def _log(self, t):
+        occ = int(self.grid.occupied_mask().sum())
+        pois = int(self.grid.poison.sum())
+        aux = int(self.grid.aux.sum())
+        pb = self.percep.pillar_world.get("blue") if self.percep else None
+        py = self.percep.pillar_world.get("yellow") if self.percep else None
+        print(f"[t={t:6.1f}] {self.state:13s} "
+              f"pose=({self.pose[0]:+.2f},{self.pose[1]:+.2f},{math.degrees(self.pose[2]):+6.1f}) "
+              f"v={self.cur_v:.2f} occ={occ} pois={pois} aux={aux} "
+              f"blue={'Y' if pb else '-'} yellow={'Y' if py else '-'} "
+              f"green_block={'Y' if self.green_block else '-'} "
+              f"ir_block={'Y' if self.ir_block else '-'}")
 
 
 def main():
-    Mak02Controller().run()
+    ctrl = Mak02Controller()
+    try:
+        ctrl.run()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        try:
+            ctrl.io.stop()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

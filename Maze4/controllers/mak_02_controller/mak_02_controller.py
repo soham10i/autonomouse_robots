@@ -220,6 +220,22 @@ class Mak02Controller:
     def _ensure_costmap(self, t, force=False):
         if force or self.cost is None or (t - self._last_costmap_t) >= C.REPLAN_PERIOD_S:
             self.cost, self.lethal = self.grid.build_costmap()
+            # ---- anti-self-boxing: the robot IS here, so clear its disc ----
+            # The lethal inflation can make the robot's own cell and all
+            # neighbours impassable (e.g. corridor walls within HARD_OBS_DIST
+            # on both sides).  When that happens A* cannot even START and
+            # _select_frontier() returns nothing → permanent spin deadlock.
+            # Fix: force a small disc around the robot to be non-lethal with
+            # finite (high) cost.  The DWA local planner still uses live lidar
+            # for real wall clearance, so safety is preserved.
+            cix, ciy = self.grid.world_to_grid(self.pose[0], self.pose[1])
+            r = 3  # cells (~0.12 m at 0.04 res) — enough for A* to start
+            n = self.grid.n
+            x0, x1 = max(0, cix - r), min(n, cix + r + 1)
+            y0, y1 = max(0, ciy - r), min(n, ciy + r + 1)
+            self.lethal[x0:x1, y0:y1] = False
+            sub = self.cost[x0:x1, y0:y1]
+            np.minimum(sub, C.COST_OBS_WEIGHT * 0.5, out=sub)  # capped, not free
             self._last_costmap_t = t
 
     def _plan_to(self, goal_world):
@@ -266,16 +282,6 @@ class Mak02Controller:
     def _path_length(path):
         return sum(math.hypot(path[i + 1][0] - path[i][0], path[i + 1][1] - path[i][1])
                    for i in range(len(path) - 1))
-
-    def _pillar_standoff(self, pillar_world):
-        """A reachable point ~PILLAR_STANDOFF short of the pillar centre."""
-        px, py = pillar_world
-        d = math.hypot(px - self.pose[0], py - self.pose[1])
-        if d < 1e-3:
-            return pillar_world
-        ux, uy = (px - self.pose[0]) / d, (py - self.pose[1]) / d
-        s = max(0.0, d - C.PILLAR_STANDOFF)
-        return (self.pose[0] + ux * s, self.pose[1] + uy * s)
 
     # ===================================================================== #
     #  Driving
@@ -399,7 +405,7 @@ class Mak02Controller:
         if (t - getattr(self, "_last_go_try", -1e9)) < 0.4:
             return False
         self._last_go_try = t
-        goal = self._pillar_standoff(pw)
+        goal = pw
         path = self._plan_to(goal)
         if path is None:
             return False
@@ -420,6 +426,9 @@ class Mak02Controller:
                     pose_distance(self.pose, self.goal_world) < C.GOAL_REACH_TOL or
                     (t - self._last_plan_t()) > C.REPLAN_PERIOD_S)
         if need_new:
+            # force a fresh costmap before frontier selection so we plan on the
+            # most up-to-date data (also re-runs the anti-self-boxing disc)
+            self._ensure_costmap(t, force=True)
             path, goal = self._select_frontier()
             if path is not None:
                 self.path, self.goal_world = path, goal
@@ -452,8 +461,8 @@ class Mak02Controller:
             self._reset_progress(t)   # don't inherit stale stuck timer into next state
             self.state = next_state
             return 0.0, 0.0
-        # keep the goal/standoff fresh as the estimate refines
-        goal = self._pillar_standoff(pw)
+        # keep the goal fresh as the estimate refines
+        goal = pw
         if (self.goal_world is None or pose_distance(goal, self.goal_world) > 0.15
                 or not self.path or (t - self._last_plan_t()) > C.REPLAN_PERIOD_S):
             path = self._plan_to(goal)

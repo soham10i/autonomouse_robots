@@ -1,0 +1,362 @@
+[0.00s #0] INFO MONITOR: fault monitor started
+[0.03s #1] WARN LIDAR_SPARSE: lidar only 0 valid beams
+[0.06s #2] INFO LIDAR_SPARSE: cleared
+[0.10s #3] WARN SLAM_LOST: scan-match rejected x3 (norm=0.00)
+[0.13s #4] WARN SLAM_LOST: scan-match rejected x4 (norm=0.00)
+[0.16s #5] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[0.16s #5] INFO SLAM_LOST: cleared
+[0.26s #8] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[0.99s #31] INFO DEPTH_UNMAPPED: cleared
+[2.46s #77] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[2.98s #93] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[3.07s #96] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.08 but it's NOT mapped (marking pipeline / near-wall filter?)
+[3.17s #99] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[3.20s #100] INFO DEPTH_UNMAPPED: cleared
+[3.26s #102] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.71m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[3.33s #104] INFO DEPTH_UNMAPPED: cleared
+[3.36s #105] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.80m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[3.46s #108] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.75m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[3.55s #111] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.77m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[3.65s #114] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.79m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[3.74s #117] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.81m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[3.84s #120] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.81m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[4.10s #128] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.80m z=0.07 but it's NOT mapped (marking pipeline / near-wall filter?)
+[4.19s #131] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[4.45s #139] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.18 but it's NOT mapped (marking pipeline / near-wall filter?)
+[4.54s #142] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.07 but it's NOT mapped (marking pipeline / near-wall filter?)
+[4.64s #145] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[4.93s #154] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.65m z=0.09 but it's NOT mapped (marking pipeline / near-wall filter?)
+[5.02s #157] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.77m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[5.12s #160] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.76m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[5.22s #163] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.75m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[5.41s #169] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.75m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[5.54s #173] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.61m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[5.66s #177] INFO DEPTH_UNMAPPED: cleared
+[6.30s #197] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[6.40s #200] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.62m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[6.50s #203] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.68m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[6.59s #206] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[6.78s #212] EVENT FSM: INIT_SCAN -> EXPLORE_BLUE
+[6.91s #216] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[7.01s #219] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[7.30s #228] INFO DEPTH_UNMAPPED: cleared
+[7.78s #243] WARN DEPTH_BLANK: depth almost all-invalid (0.00)
+[8.58s #268] INFO DEPTH_BLANK: cleared
+[8.64s #270] WARN FW_BLINDZONE: floating wall 0.59m ahead is INSIDE depth blind zone (<0.6m) and unmapped — only the bumper can catch it
+[8.67s #271] WARN FW_BLINDZONE: floating wall 0.58m ahead is INSIDE depth blind zone (<0.6m) and unmapped — only the bumper can catch it
+[8.70s #272] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[8.70s #272] INFO FW_BLINDZONE: cleared
+[8.80s #275] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.20 but it's NOT mapped (marking pipeline / near-wall filter?)
+[8.86s #277] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.07 but it's NOT mapped (marking pipeline / near-wall filter?)
+[8.96s #280] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[9.38s #293] INFO DEPTH_UNMAPPED: cleared
+[9.41s #294] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[9.89s #309] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.62m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[10.14s #317] INFO DEPTH_UNMAPPED: cleared
+[11.68s #365] WARN PLAN_UNDER_FW: A* path passes through/near a floating-wall cell
+[11.94s #373] INFO PLAN_UNDER_FW: cleared
+[12.42s #388] WARN FLOATWALL_AHEAD: floating wall 0.54m ahead src=mapped mapped=True blind=True v=0.22
+[12.45s #389] WARN FLOATWALL_AHEAD: floating wall 0.52m ahead src=mapped mapped=True blind=True v=0.22
+[12.48s #390] WARN FLOATWALL_AHEAD: floating wall 0.51m ahead src=mapped mapped=True blind=True v=0.22
+[12.54s #392] WARN FLOATWALL_AHEAD: floating wall 0.50m ahead src=mapped mapped=True blind=True v=0.22
+[12.58s #393] WARN FLOATWALL_AHEAD: floating wall 0.49m ahead src=mapped mapped=True blind=True v=0.22
+[12.61s #394] WARN FLOATWALL_AHEAD: floating wall 0.51m ahead src=mapped mapped=True blind=True v=0.22
+[12.64s #395] WARN FLOATWALL_AHEAD: floating wall 0.50m ahead src=mapped mapped=True blind=True v=0.22
+[12.70s #397] INFO FLOATWALL_AHEAD: cleared
+[12.99s #406] WARN FLOATWALL_AHEAD: floating wall 0.55m ahead src=mapped mapped=True blind=True v=0.22
+[13.02s #407] WARN FLOATWALL_AHEAD: floating wall 0.54m ahead src=mapped mapped=True blind=True v=0.22
+[13.09s #409] INFO FLOATWALL_AHEAD: cleared
+[13.12s #410] WARN FLOATWALL_AHEAD: floating wall 0.55m ahead src=mapped mapped=True blind=True v=0.22
+[13.15s #411] WARN FLOATWALL_AHEAD: floating wall 0.54m ahead src=mapped mapped=True blind=True v=0.22
+[13.18s #412] WARN FLOATWALL_AHEAD: floating wall 0.53m ahead src=mapped mapped=True blind=True v=0.22
+[13.25s #414] INFO FLOATWALL_AHEAD: cleared
+[14.75s #461] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=1.23m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[15.01s #469] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=1.25m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[15.26s #477] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=1.22m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[15.52s #485] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=1.18m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[15.78s #493] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=1.14m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[16.03s #501] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=1.09m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[16.29s #509] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=1.01m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[16.54s #517] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.94m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[16.80s #525] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.89m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[17.06s #533] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.84m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[17.31s #541] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.79m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[17.57s #549] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.74m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[17.82s #557] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.70m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[18.08s #565] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.65m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[18.34s #573] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[18.53s #579] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.19 but it's NOT mapped (marking pipeline / near-wall filter?)
+[18.69s #584] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[18.85s #589] WARN DEPTH_BLANK: depth almost all-invalid (0.00)
+[18.85s #589] INFO DEPTH_UNMAPPED: cleared
+[19.42s #607] INFO DEPTH_BLANK: cleared
+[19.46s #608] WARN FW_BLINDZONE: floating wall 0.59m ahead is INSIDE depth blind zone (<0.6m) and unmapped — only the bumper can catch it
+[19.52s #610] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[19.52s #610] INFO FW_BLINDZONE: cleared
+[19.65s #614] INFO DEPTH_UNMAPPED: cleared
+[19.71s #616] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[20.13s #629] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.18 but it's NOT mapped (marking pipeline / near-wall filter?)
+[20.26s #633] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[20.38s #637] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=1.34m z=0.19 but it's NOT mapped (marking pipeline / near-wall filter?)
+[20.48s #640] INFO DEPTH_UNMAPPED: cleared
+[20.51s #641] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.62m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[20.67s #646] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.98m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[20.96s #655] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.94m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[21.22s #663] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.88m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[21.47s #671] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.82m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[21.73s #679] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.76m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[21.98s #687] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.70m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[21.98s #687] WARN PLAN_UNDER_FW: A* path passes through/near a floating-wall cell
+[22.24s #695] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.97m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[22.50s #703] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.93m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[22.75s #711] INFO DEPTH_UNMAPPED: cleared
+[22.82s #713] INFO PLAN_UNDER_FW: cleared
+[24.99s #781] WARN FLOATWALL_AHEAD: floating wall 0.54m ahead src=mapped mapped=True blind=True v=0.22
+[25.06s #783] INFO FLOATWALL_AHEAD: cleared
+[25.09s #784] WARN FLOATWALL_AHEAD: floating wall 0.55m ahead src=mapped mapped=True blind=True v=0.22
+[25.12s #785] WARN FLOATWALL_AHEAD: floating wall 0.54m ahead src=mapped mapped=True blind=True v=0.22
+[25.15s #786] WARN FLOATWALL_AHEAD: floating wall 0.53m ahead src=mapped mapped=True blind=True v=0.22
+[25.22s #788] WARN FLOATWALL_AHEAD: floating wall 0.52m ahead src=mapped mapped=True blind=True v=0.22
+[25.25s #789] WARN FLOATWALL_AHEAD: floating wall 0.51m ahead src=mapped mapped=True blind=True v=0.22
+[25.28s #790] WARN FLOATWALL_AHEAD: floating wall 0.50m ahead src=mapped mapped=True blind=True v=0.22
+[25.34s #792] WARN FLOATWALL_AHEAD: floating wall 0.49m ahead src=mapped mapped=True blind=True v=0.22
+[25.38s #793] WARN FLOATWALL_AHEAD: floating wall 0.48m ahead src=mapped mapped=True blind=True v=0.22
+[25.44s #795] WARN FLOATWALL_AHEAD: floating wall 0.47m ahead src=mapped mapped=True blind=True v=0.22
+[25.47s #796] WARN FLOATWALL_AHEAD: floating wall 0.46m ahead src=mapped mapped=True blind=True v=0.22
+[25.54s #798] WARN FLOATWALL_AHEAD: floating wall 0.45m ahead src=mapped mapped=True blind=True v=0.22
+[25.57s #799] WARN FLOATWALL_AHEAD: floating wall 0.44m ahead src=mapped mapped=True blind=True v=0.22
+[25.60s #800] WARN FLOATWALL_AHEAD: floating wall 0.43m ahead src=mapped mapped=True blind=True v=0.22
+[25.66s #802] WARN FLOATWALL_AHEAD: floating wall 0.42m ahead src=mapped mapped=True blind=True v=0.22
+[25.70s #803] WARN FLOATWALL_AHEAD: floating wall 0.41m ahead src=mapped mapped=True blind=True v=0.22
+[25.73s #804] WARN FLOATWALL_AHEAD: floating wall 0.40m ahead src=mapped mapped=True blind=True v=0.22
+[25.79s #806] WARN FLOATWALL_AHEAD: floating wall 0.39m ahead src=mapped mapped=True blind=True v=0.22
+[25.86s #808] WARN FLOATWALL_AHEAD: floating wall 0.38m ahead src=mapped mapped=True blind=True v=0.22
+[25.89s #809] WARN FLOATWALL_AHEAD: floating wall 0.37m ahead src=mapped mapped=True blind=True v=0.00
+[25.98s #812] WARN FLOATWALL_AHEAD: floating wall 0.35m ahead src=mapped mapped=True blind=True v=0.00
+[26.02s #813] WARN FLOATWALL_AHEAD: floating wall 0.38m ahead src=mapped mapped=True blind=True v=0.00
+[26.05s #814] WARN FLOATWALL_AHEAD: floating wall 0.41m ahead src=mapped mapped=True blind=True v=0.00
+[26.08s #815] WARN FLOATWALL_AHEAD: floating wall 0.49m ahead src=mapped mapped=True blind=True v=0.00
+[26.11s #816] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=1.00m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[26.11s #816] INFO FLOATWALL_AHEAD: cleared
+[26.30s #822] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.99m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[26.40s #825] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.96m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[26.59s #831] INFO DEPTH_UNMAPPED: cleared
+[26.62s #832] WARN DEPTH_BLANK: depth almost all-invalid (0.03)
+[26.69s #834] INFO DEPTH_BLANK: cleared
+[26.78s #837] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.75m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[26.88s #840] WARN FLOATWALL_AHEAD: floating wall 0.43m ahead src=mapped mapped=True blind=True v=0.18
+[26.88s #840] INFO DEPTH_UNMAPPED: cleared
+[26.91s #841] WARN FLOATWALL_AHEAD: floating wall 0.42m ahead src=mapped mapped=True blind=True v=0.18
+[26.98s #843] WARN FLOATWALL_AHEAD: floating wall 0.41m ahead src=mapped mapped=True blind=True v=0.22
+[27.01s #844] WARN FLOATWALL_AHEAD: floating wall 0.41m ahead src=mapped mapped=True blind=True v=0.18
+[27.04s #845] WARN FLOATWALL_AHEAD: floating wall 0.40m ahead src=mapped mapped=True blind=True v=0.22
+[27.10s #847] WARN FLOATWALL_AHEAD: floating wall 0.39m ahead src=mapped mapped=True blind=True v=0.22
+[27.17s #849] WARN FLOATWALL_AHEAD: floating wall 0.40m ahead src=mapped mapped=True blind=True v=0.22
+[27.20s #850] WARN FLOATWALL_AHEAD: floating wall 0.39m ahead src=mapped mapped=True blind=True v=0.22
+[27.26s #852] WARN FLOATWALL_AHEAD: floating wall 0.38m ahead src=mapped mapped=True blind=True v=0.22
+[27.30s #853] WARN FLOATWALL_AHEAD: floating wall 0.37m ahead src=mapped mapped=True blind=True v=0.22
+[27.36s #855] WARN FLOATWALL_AHEAD: floating wall 0.36m ahead src=mapped mapped=True blind=True v=0.22
+[27.39s #856] WARN FLOATWALL_AHEAD: floating wall 0.35m ahead src=mapped mapped=True blind=True v=0.22
+[27.46s #858] WARN FLOATWALL_AHEAD: floating wall 0.34m ahead src=mapped mapped=True blind=True v=0.22
+[27.52s #860] WARN FLOATWALL_AHEAD: floating wall 0.33m ahead src=mapped mapped=True blind=True v=0.22
+[27.55s #861] WARN FLOATWALL_AHEAD: floating wall 0.32m ahead src=mapped mapped=True blind=True v=0.22
+[27.58s #862] FAIL FLOATWALL_AHEAD: floating wall 0.32m ahead src=mapped mapped=True blind=True v=0.22
+[27.62s #863] FAIL FLOATWALL_AHEAD: floating wall 0.31m ahead src=mapped mapped=True blind=True v=0.22
+[27.65s #864] FAIL FLOATWALL_AHEAD: floating wall 0.30m ahead src=mapped mapped=True blind=True v=0.22
+[27.68s #865] FAIL FLOATWALL_AHEAD: floating wall 0.32m ahead src=mapped mapped=True blind=True v=0.22
+[27.71s #866] FAIL FLOATWALL_AHEAD: floating wall 0.31m ahead src=mapped mapped=True blind=True v=0.22
+[27.78s #868] FAIL FLOATWALL_AHEAD: floating wall 0.30m ahead src=mapped mapped=True blind=True v=0.22
+[27.81s #869] FAIL FLOATWALL_AHEAD: floating wall 0.29m ahead src=mapped mapped=True blind=True v=0.22
+[27.87s #871] FAIL FLOATWALL_AHEAD: floating wall 0.28m ahead src=mapped mapped=True blind=True v=0.22
+[27.94s #873] FAIL FLOATWALL_AHEAD: floating wall 0.31m ahead src=mapped mapped=True blind=True v=0.22
+[27.97s #874] FAIL FLOATWALL_AHEAD: floating wall 0.30m ahead src=mapped mapped=True blind=True v=0.22
+[28.03s #876] FAIL FLOATWALL_AHEAD: floating wall 0.29m ahead src=mapped mapped=True blind=True v=0.22
+[28.06s #877] FAIL FLOATWALL_AHEAD: floating wall 0.28m ahead src=mapped mapped=True blind=True v=0.22
+[28.13s #879] FAIL FLOATWALL_AHEAD: floating wall 0.31m ahead src=mapped mapped=True blind=True v=0.22
+[28.16s #880] FAIL FLOATWALL_AHEAD: floating wall 0.30m ahead src=mapped mapped=True blind=True v=0.22
+[28.22s #882] FAIL FLOATWALL_AHEAD: floating wall 0.29m ahead src=mapped mapped=True blind=True v=0.22
+[28.26s #883] FAIL FLOATWALL_AHEAD: floating wall 0.28m ahead src=mapped mapped=True blind=True v=0.22
+[28.32s #885] FAIL FLOATWALL_AHEAD: floating wall 0.27m ahead src=mapped mapped=True blind=True v=0.22
+[28.38s #887] FAIL FLOATWALL_AHEAD: floating wall 0.31m ahead src=mapped mapped=True blind=True v=0.22
+[28.42s #888] FAIL FLOATWALL_AHEAD: floating wall 0.30m ahead src=mapped mapped=True blind=True v=0.22
+[28.45s #889] EVENT BUMPER: invisible obstacle stamped @ (+0.84,-1.23) — forward push with no progress (likely a blind-zone floating wall)
+[28.48s #890] FAIL FLOATWALL_AHEAD: floating wall 0.29m ahead src=mapped mapped=True blind=True v=0.04
+[28.61s #894] FAIL FLOATWALL_AHEAD: floating wall 0.28m ahead src=mapped mapped=True blind=True v=0.04
+[28.67s #896] FAIL FLOATWALL_AHEAD: floating wall 0.31m ahead src=mapped mapped=True blind=True v=0.09
+[28.77s #899] FAIL FLOATWALL_AHEAD: floating wall 0.30m ahead src=mapped mapped=True blind=True v=0.09
+[28.86s #902] FAIL FLOATWALL_AHEAD: floating wall 0.29m ahead src=mapped mapped=True blind=True v=0.09
+[28.93s #904] FAIL FLOATWALL_AHEAD: floating wall 0.29m ahead src=mapped mapped=True blind=True v=0.04
+[28.96s #905] FAIL FLOATWALL_AHEAD: floating wall 0.32m ahead src=mapped mapped=True blind=True v=0.13
+[28.99s #906] FAIL FLOATWALL_AHEAD: floating wall 0.31m ahead src=mapped mapped=True blind=True v=0.09
+[29.09s #909] FAIL FLOATWALL_AHEAD: floating wall 0.30m ahead src=mapped mapped=True blind=True v=0.09
+[29.22s #913] FAIL FLOATWALL_AHEAD: floating wall 0.29m ahead src=mapped mapped=True blind=True v=0.09
+[29.28s #915] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.65m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[29.28s #915] INFO FLOATWALL_AHEAD: cleared
+[29.31s #916] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.75m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[30.78s #962] EVENT RECOVERY: stuck in EXPLORE_BLUE; fw_ahead=0.71m src=live_depth clear=0.10359624418084719
+[31.33s #979] WARN FLOATWALL_AHEAD: floating wall 0.40m ahead src=mapped mapped=True blind=True v=0.20
+[31.33s #979] INFO DEPTH_UNMAPPED: cleared
+[31.36s #980] WARN FLOATWALL_AHEAD: floating wall 0.41m ahead src=mapped mapped=True blind=True v=0.20
+[31.42s #982] WARN FLOATWALL_AHEAD: floating wall 0.42m ahead src=mapped mapped=True blind=True v=0.20
+[31.49s #984] WARN FLOATWALL_AHEAD: floating wall 0.43m ahead src=mapped mapped=True blind=True v=0.20
+[31.52s #985] WARN FLOATWALL_AHEAD: floating wall 0.44m ahead src=mapped mapped=True blind=True v=0.20
+[31.58s #987] WARN FLOATWALL_AHEAD: floating wall 0.45m ahead src=mapped mapped=True blind=True v=0.20
+[31.62s #988] WARN FLOATWALL_AHEAD: floating wall 0.46m ahead src=mapped mapped=True blind=True v=0.20
+[31.68s #990] WARN FLOATWALL_AHEAD: floating wall 0.47m ahead src=mapped mapped=True blind=True v=0.20
+[31.71s #991] WARN FLOATWALL_AHEAD: floating wall 0.47m ahead src=mapped mapped=True blind=True v=0.00
+[31.84s #995] WARN FLOATWALL_AHEAD: floating wall 0.48m ahead src=mapped mapped=True blind=True v=0.00
+[32.13s #1004] WARN FLOATWALL_AHEAD: floating wall 0.49m ahead src=mapped mapped=True blind=True v=0.00
+[32.22s #1007] WARN FLOATWALL_AHEAD: floating wall 0.48m ahead src=mapped mapped=True blind=True v=0.00
+[32.32s #1010] WARN FLOATWALL_AHEAD: floating wall 0.49m ahead src=mapped mapped=True blind=True v=0.00
+[32.42s #1013] INFO FLOATWALL_AHEAD: cleared
+[32.77s #1024] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.96m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[32.99s #1031] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.99m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[33.12s #1035] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=1.00m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[33.28s #1040] INFO DEPTH_UNMAPPED: cleared
+[33.38s #1043] WARN FLOATWALL_AHEAD: floating wall 0.49m ahead src=mapped mapped=True blind=True v=0.00
+[33.41s #1044] WARN FLOATWALL_AHEAD: floating wall 0.45m ahead src=mapped mapped=True blind=True v=0.00
+[33.44s #1045] WARN FLOATWALL_AHEAD: floating wall 0.40m ahead src=mapped mapped=True blind=True v=0.00
+[33.50s #1047] WARN FLOATWALL_AHEAD: floating wall 0.33m ahead src=mapped mapped=True blind=True v=0.00
+[33.60s #1050] WARN FLOATWALL_AHEAD: floating wall 0.32m ahead src=mapped mapped=True blind=True v=0.00
+[33.70s #1053] WARN FLOATWALL_AHEAD: floating wall 0.33m ahead src=mapped mapped=True blind=True v=0.00
+[33.89s #1059] WARN FLOATWALL_AHEAD: floating wall 0.34m ahead src=mapped mapped=True blind=True v=0.00
+[34.05s #1064] WARN FLOATWALL_AHEAD: floating wall 0.32m ahead src=mapped mapped=True blind=True v=0.00
+[34.11s #1066] WARN FLOATWALL_AHEAD: floating wall 0.34m ahead src=mapped mapped=True blind=True v=0.00
+[34.18s #1068] WARN FLOATWALL_AHEAD: floating wall 0.33m ahead src=mapped mapped=True blind=True v=0.00
+[34.30s #1072] WARN FLOATWALL_AHEAD: floating wall 0.31m ahead src=mapped mapped=True blind=True v=0.00
+[34.37s #1074] WARN FLOATWALL_AHEAD: floating wall 0.41m ahead src=mapped mapped=True blind=True v=0.00
+[34.43s #1076] WARN FLOATWALL_AHEAD: floating wall 0.49m ahead src=mapped mapped=True blind=True v=0.00
+[34.46s #1077] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=1.00m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[34.46s #1077] INFO FLOATWALL_AHEAD: cleared
+[34.66s #1083] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.98m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[34.75s #1086] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.95m z=0.09 but it's NOT mapped (marking pipeline / near-wall filter?)
+[34.85s #1089] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.97m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[34.94s #1092] WARN DEPTH_BLANK: depth almost all-invalid (0.02)
+[34.94s #1092] INFO DEPTH_UNMAPPED: cleared
+[35.04s #1095] INFO DEPTH_BLANK: cleared
+[35.14s #1098] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.78m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[35.23s #1101] WARN FLOATWALL_AHEAD: floating wall 0.46m ahead src=mapped mapped=True blind=True v=0.22
+[35.23s #1101] INFO DEPTH_UNMAPPED: cleared
+[35.26s #1102] WARN FLOATWALL_AHEAD: floating wall 0.45m ahead src=mapped mapped=True blind=True v=0.22
+[35.33s #1104] WARN FLOATWALL_AHEAD: floating wall 0.44m ahead src=mapped mapped=True blind=True v=0.22
+[35.36s #1105] WARN FLOATWALL_AHEAD: floating wall 0.44m ahead src=mapped mapped=True blind=True v=0.18
+[35.39s #1106] WARN FLOATWALL_AHEAD: floating wall 0.43m ahead src=mapped mapped=True blind=True v=0.18
+[35.46s #1108] WARN FLOATWALL_AHEAD: floating wall 0.43m ahead src=mapped mapped=True blind=True v=0.22
+[35.49s #1109] WARN FLOATWALL_AHEAD: floating wall 0.42m ahead src=mapped mapped=True blind=True v=0.22
+[35.52s #1110] WARN FLOATWALL_AHEAD: floating wall 0.41m ahead src=mapped mapped=True blind=True v=0.22
+[35.58s #1112] WARN FLOATWALL_AHEAD: floating wall 0.40m ahead src=mapped mapped=True blind=True v=0.22
+[35.65s #1114] WARN FLOATWALL_AHEAD: floating wall 0.39m ahead src=mapped mapped=True blind=True v=0.22
+[35.68s #1115] WARN FLOATWALL_AHEAD: floating wall 0.38m ahead src=mapped mapped=True blind=True v=0.22
+[35.71s #1116] WARN FLOATWALL_AHEAD: floating wall 0.37m ahead src=mapped mapped=True blind=True v=0.22
+[35.74s #1117] WARN FLOATWALL_AHEAD: floating wall 0.36m ahead src=mapped mapped=True blind=True v=0.22
+[35.78s #1118] WARN FLOATWALL_AHEAD: floating wall 0.35m ahead src=mapped mapped=True blind=True v=0.18
+[35.81s #1119] WARN FLOATWALL_AHEAD: floating wall 0.35m ahead src=mapped mapped=True blind=True v=0.22
+[35.84s #1120] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.76m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[35.84s #1120] INFO FLOATWALL_AHEAD: cleared
+[36.03s #1126] FAIL FLOATWALL_AHEAD: floating wall 0.31m ahead src=mapped mapped=True blind=True v=0.04
+[36.03s #1126] INFO DEPTH_UNMAPPED: cleared
+[36.06s #1127] FAIL FLOATWALL_AHEAD: floating wall 0.31m ahead src=mapped mapped=True blind=True v=0.22
+[36.10s #1128] FAIL FLOATWALL_AHEAD: floating wall 0.30m ahead src=mapped mapped=True blind=True v=0.22
+[36.13s #1129] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.66m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[36.13s #1129] INFO FLOATWALL_AHEAD: cleared
+[36.54s #1142] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.66m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[37.02s #1157] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.75m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[37.60s #1175] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.74m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[38.21s #1194] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.75m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[38.69s #1209] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.74m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[39.30s #1228] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.73m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[39.55s #1236] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.74m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[39.74s #1242] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.72m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[40.58s #1268] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.71m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[41.09s #1284] EVENT RECOVERY: stuck in EXPLORE_BLUE; fw_ahead=0.69m src=live_depth clear=0.12026485603310393
+[41.12s #1285] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.67m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[41.38s #1293] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.72m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[41.63s #1301] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.76m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[41.89s #1309] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.81m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[42.14s #1317] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.86m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[42.46s #1327] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.83m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[42.50s #1328] WARN FLOATWALL_AHEAD: floating wall 0.51m ahead src=mapped mapped=True blind=True v=0.00
+[42.50s #1328] INFO DEPTH_UNMAPPED: cleared
+[42.75s #1336] WARN FLOATWALL_AHEAD: floating wall 0.50m ahead src=mapped mapped=True blind=True v=0.00
+[43.04s #1345] WARN FLOATWALL_AHEAD: floating wall 0.51m ahead src=mapped mapped=True blind=True v=0.00
+[43.14s #1348] WARN FLOATWALL_AHEAD: floating wall 0.52m ahead src=mapped mapped=True blind=True v=0.00
+[43.23s #1351] INFO FLOATWALL_AHEAD: cleared
+[43.49s #1359] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.99m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[43.58s #1362] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.96m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[43.68s #1365] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.98m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[43.81s #1369] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=1.01m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[43.90s #1372] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=1.01m z=0.05 but it's NOT mapped (marking pipeline / near-wall filter?)
+[44.00s #1375] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=1.01m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[44.06s #1377] INFO DEPTH_UNMAPPED: cleared
+[44.16s #1380] WARN FLOATWALL_AHEAD: floating wall 0.42m ahead src=mapped mapped=True blind=True v=0.00
+[44.19s #1381] WARN FLOATWALL_AHEAD: floating wall 0.33m ahead src=mapped mapped=True blind=True v=0.00
+[44.38s #1387] WARN FLOATWALL_AHEAD: floating wall 0.34m ahead src=mapped mapped=True blind=True v=0.00
+[44.48s #1390] WARN FLOATWALL_AHEAD: floating wall 0.35m ahead src=mapped mapped=True blind=True v=0.00
+[44.58s #1393] WARN FLOATWALL_AHEAD: floating wall 0.34m ahead src=mapped mapped=True blind=True v=0.00
+[44.86s #1402] WARN FLOATWALL_AHEAD: floating wall 0.35m ahead src=mapped mapped=True blind=True v=0.00
+[45.06s #1408] WARN FLOATWALL_AHEAD: floating wall 0.33m ahead src=mapped mapped=True blind=True v=0.00
+[45.09s #1409] WARN FLOATWALL_AHEAD: floating wall 0.35m ahead src=mapped mapped=True blind=True v=0.00
+[45.12s #1410] WARN FLOATWALL_AHEAD: floating wall 0.40m ahead src=mapped mapped=True blind=True v=0.00
+[45.15s #1411] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=1.01m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[45.15s #1411] INFO FLOATWALL_AHEAD: cleared
+[45.34s #1417] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.99m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[45.44s #1420] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.97m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[45.54s #1423] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.98m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[45.63s #1426] WARN DEPTH_BLANK: depth almost all-invalid (0.02)
+[45.63s #1426] INFO DEPTH_UNMAPPED: cleared
+[45.73s #1429] INFO DEPTH_BLANK: cleared
+[45.82s #1432] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.78m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[45.92s #1435] WARN FLOATWALL_AHEAD: floating wall 0.47m ahead src=mapped mapped=True blind=True v=0.22
+[45.92s #1435] INFO DEPTH_UNMAPPED: cleared
+[45.98s #1437] WARN FLOATWALL_AHEAD: floating wall 0.46m ahead src=mapped mapped=True blind=True v=0.22
+[46.08s #1440] WARN FLOATWALL_AHEAD: floating wall 0.45m ahead src=mapped mapped=True blind=True v=0.22
+[46.11s #1441] WARN FLOATWALL_AHEAD: floating wall 0.44m ahead src=mapped mapped=True blind=True v=0.22
+[46.14s #1442] WARN FLOATWALL_AHEAD: floating wall 0.43m ahead src=mapped mapped=True blind=True v=0.22
+[46.18s #1443] WARN FLOATWALL_AHEAD: floating wall 0.42m ahead src=mapped mapped=True blind=True v=0.22
+[46.21s #1444] WARN FLOATWALL_AHEAD: floating wall 0.41m ahead src=mapped mapped=True blind=True v=0.22
+[46.24s #1445] WARN FLOATWALL_AHEAD: floating wall 0.40m ahead src=mapped mapped=True blind=True v=0.22
+[46.27s #1446] WARN FLOATWALL_AHEAD: floating wall 0.39m ahead src=mapped mapped=True blind=True v=0.22
+[46.34s #1448] WARN FLOATWALL_AHEAD: floating wall 0.38m ahead src=mapped mapped=True blind=True v=0.22
+[46.37s #1449] WARN FLOATWALL_AHEAD: floating wall 0.37m ahead src=mapped mapped=True blind=True v=0.22
+[46.40s #1450] WARN FLOATWALL_AHEAD: floating wall 0.36m ahead src=mapped mapped=True blind=True v=0.22
+[46.43s #1451] WARN FLOATWALL_AHEAD: floating wall 0.35m ahead src=mapped mapped=True blind=True v=0.22
+[46.46s #1452] WARN FLOATWALL_AHEAD: floating wall 0.35m ahead src=mapped mapped=True blind=True v=0.18
+[46.50s #1453] WARN FLOATWALL_AHEAD: floating wall 0.34m ahead src=mapped mapped=True blind=True v=0.18
+[46.53s #1454] WARN FLOATWALL_AHEAD: floating wall 0.34m ahead src=mapped mapped=True blind=True v=0.13
+[46.56s #1455] WARN FLOATWALL_AHEAD: floating wall 0.33m ahead src=mapped mapped=True blind=True v=0.18
+[46.62s #1457] WARN FLOATWALL_AHEAD: floating wall 0.32m ahead src=mapped mapped=True blind=True v=0.13
+[46.66s #1458] FAIL FLOATWALL_AHEAD: floating wall 0.32m ahead src=mapped mapped=True blind=True v=0.13
+[46.69s #1459] FAIL FLOATWALL_AHEAD: floating wall 0.31m ahead src=mapped mapped=True blind=True v=0.13
+[46.72s #1460] FAIL FLOATWALL_AHEAD: floating wall 0.31m ahead src=mapped mapped=True blind=True v=0.09
+[46.78s #1462] FAIL FLOATWALL_AHEAD: floating wall 0.30m ahead src=mapped mapped=True blind=True v=0.09
+[46.91s #1466] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.75m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[46.91s #1466] INFO FLOATWALL_AHEAD: cleared
+[47.42s #1482] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.75m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[48.96s #1530] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.74m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[49.22s #1538] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.75m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[49.38s #1543] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.66m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[50.08s #1565] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.74m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[50.27s #1571] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.66m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[51.01s #1594] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.74m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[51.78s #1618] EVENT RECOVERY: stuck in EXPLORE_BLUE; fw_ahead=0.70m src=live_depth clear=0.12426021230741499
+[52.32s #1635] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.75m z=0.04 but it's NOT mapped (marking pipeline / near-wall filter?)
+[52.58s #1643] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.79m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[52.67s #1646] WARN FLOATWALL_AHEAD: floating wall 0.48m ahead src=mapped mapped=True blind=True v=0.20
+[52.67s #1646] INFO DEPTH_UNMAPPED: cleared
+[52.70s #1647] WARN FLOATWALL_AHEAD: floating wall 0.49m ahead src=mapped mapped=True blind=True v=0.20
+[52.77s #1649] WARN FLOATWALL_AHEAD: floating wall 0.50m ahead src=mapped mapped=True blind=True v=0.20
+[52.83s #1651] WARN FLOATWALL_AHEAD: floating wall 0.51m ahead src=mapped mapped=True blind=True v=0.20
+[52.86s #1652] WARN FLOATWALL_AHEAD: floating wall 0.52m ahead src=mapped mapped=True blind=True v=0.00
+[52.99s #1656] WARN FLOATWALL_AHEAD: floating wall 0.54m ahead src=mapped mapped=True blind=True v=0.00
+[53.09s #1659] WARN FLOATWALL_AHEAD: floating wall 0.52m ahead src=mapped mapped=True blind=True v=0.00
+[53.28s #1665] WARN FLOATWALL_AHEAD: floating wall 0.53m ahead src=mapped mapped=True blind=True v=0.00
+[53.38s #1668] WARN FLOATWALL_AHEAD: floating wall 0.54m ahead src=mapped mapped=True blind=True v=0.00
+[53.70s #1678] INFO FLOATWALL_AHEAD: cleared
+[53.82s #1682] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=1.02m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[53.92s #1685] WARN DEPTH_UNMAPPED: depth SEES in-band obstacle ahead r=0.60m z=0.22 but it's NOT mapped (marking pipeline / near-wall filter?)
+[54.37s #1699] INFO DEPTH_UNMAPPED: cleared
+[54.46s #1702] WARN FLOATWALL_AHEAD: floating wall 0.44m ahead src=mapped mapped=True blind=True v=0.00
+[54.53s #1704] WARN FLOATWALL_AHEAD: floating wall 0.36m ahead src=mapped mapped=True blind=True v=0.00
+[54.66s #1708] WARN FLOATWALL_AHEAD: floating wall 0.35m ahead src=mapped mapped=True blind=True v=0.00
+[54.85s #1714] WARN FLOATWALL_AHEAD: floating wall 0.36m ahead src=mapped mapped=True blind=True v=0.00
+[54.94s #1717] WARN FLOATWALL_AHEAD: floating wall 0.35m ahead src=mapped mapped=True blind=True v=0.00
