@@ -37,6 +37,7 @@ _C_CARROT = (230, 0, 230)
 
 
 class Visualizer:
+    """Renders the live occupancy map, costmap, planned path, frontier and pillar overlay for monitoring a run."""
     def __init__(self, grid, scale=3):
         self.grid = grid
         self.scale = scale

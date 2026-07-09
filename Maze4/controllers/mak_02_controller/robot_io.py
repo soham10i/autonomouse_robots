@@ -19,9 +19,11 @@ from controller import Robot, Keyboard  # type: ignore
 import config as C
 import ir_lookup
 from geometry import cmd_to_wheels
+from observability import get_logger
 
 
 def _first_device(robot, names):
+    """Return ``(device, name)`` for the first present name, else ``(None, None)``."""
     for n in names:
         d = robot.getDevice(n)
         if d is not None:
@@ -29,8 +31,24 @@ def _first_device(robot, names):
     return None, None
 
 
-class RobotIO:
-    def __init__(self):
+class RobotInterface:
+    """The single Webots-facing device layer for the ROSbot.
+
+    This is the only module that imports the Webots ``controller`` runtime; it
+    discovers the motors, encoders, lidar, cameras and chassis IR sensors and
+    exposes them as plain NumPy arrays and scalars. Every read is defensive: a
+    device that raises or returns nothing yields the documented safe fallback
+    (``None``/``NaN``) plus a logged warning, so a flaky sensor degrades the run
+    instead of crashing the controller.
+    """
+
+    def __init__(self, logger=None):
+        """Discover and enable all devices; a missing wheel motor is fatal.
+
+        Args:
+            logger: Optional shared logger; a dedicated one is created if omitted.
+        """
+        self.log = logger or get_logger("navctl.robot_io")
         self.robot = Robot()
         self.timestep = int(self.robot.getBasicTimeStep())
         self.dt = self.timestep * 1e-3
@@ -88,94 +106,145 @@ class RobotIO:
         self._log_inventory()
 
     # ------------------------------------------------------------- logging
+    def device_inventory(self):
+        """Return a serialisable summary of which devices were discovered."""
+        present = lambda d: d is not None
+        return {
+            "timestep_ms": self.timestep,
+            "motors_ok": [present(m) for m in self.motors],
+            "encoders_ok": [present(e) for e in self.encoders],
+            "lidar": present(self.lidar),
+            "camera": present(self.camera),
+            "depth": present(self.depth),
+            "imu": present(self.imu),
+            "ir_sensors": [n for n, _ in self.ir_sensors],
+        }
+
     def _log_inventory(self):
+        """Log the discovered-device inventory at startup for fault tracing."""
         ok = lambda d: "OK" if d is not None else "MISSING"
-        print("[robot_io] timestep =", self.timestep, "ms")
-        print("[robot_io] motors   :", [ok(m) for m in self.motors])
-        print("[robot_io] encoders :", [ok(e) for e in self.encoders])
-        print("[robot_io] lidar    :", ok(self.lidar), self.lidar_specs())
-        print("[robot_io] rgb cam  :", ok(self.camera), self.camera_specs())
-        print("[robot_io] depth    :", ok(self.depth), "(", self.depth_name, ")", self.depth_specs())
-        print("[robot_io] imu      :", ok(self.imu), "(", self.imu_name, ")")
-        print("[robot_io] ir       :", [n for n, _ in self.ir_sensors])
-        print("[robot_io] --- all devices ---")
-        for i in range(self.robot.getNumberOfDevices()):
-            d = self.robot.getDeviceByIndex(i)
-            print("   ", i, repr(d.getName()), "type=", d.getNodeType())
+        self.log.info("timestep = %d ms", self.timestep)
+        self.log.info("motors=%s encoders=%s",
+                      [ok(m) for m in self.motors], [ok(e) for e in self.encoders])
+        self.log.info("lidar=%s rgb=%s depth=%s(%s) imu=%s(%s) ir=%s",
+                      ok(self.lidar), ok(self.camera), ok(self.depth), self.depth_name,
+                      ok(self.imu), self.imu_name, [n for n, _ in self.ir_sensors])
 
     # ---------------------------------------------------------------- step
     def step(self):
+        """Advance the simulation one basic timestep; returns -1 when Webots exits."""
         return self.robot.step(self.timestep)
 
     def time(self):
+        """Current simulation time in seconds."""
         return self.robot.getTime()
 
     # -------------------------------------------------------------- motors
     def set_cmd(self, v, w):
+        """Command body velocity ``(v, w)`` by driving the wheel motors.
+
+        Maps ``(v, w)`` to left/right wheel angular velocities, clamps them to
+        the drive limit, and applies them. A motor-write failure is logged but
+        never propagated, so one bad actuation cannot crash the control loop.
+        """
         self._cmd_v, self._cmd_w = v, w
         wl, wr = cmd_to_wheels(v, w)
         m = C.WHEEL_ANG_MAX
         wl = max(-m, min(m, wl))
         wr = max(-m, min(m, wr))
         # ROSbot order: fl, fr, rl, rr  -> left {fl, rl}, right {fr, rr}
-        self.motors[0].setVelocity(wl)
-        self.motors[2].setVelocity(wl)
-        self.motors[1].setVelocity(wr)
-        self.motors[3].setVelocity(wr)
+        try:
+            self.motors[0].setVelocity(wl)
+            self.motors[2].setVelocity(wl)
+            self.motors[1].setVelocity(wr)
+            self.motors[3].setVelocity(wr)
+        except Exception as exc:  # noqa: BLE001 - actuation write barrier
+            self.log.error("motor command failed (v=%.2f w=%.2f): %s", v, w, exc)
 
     def stop(self):
+        """Command zero velocity (halt the robot)."""
         self.set_cmd(0.0, 0.0)
 
     # ------------------------------------------------------------- sensors
     def read_encoders(self):
-        """(left_rad, right_rad) averaged front/rear, or (None, None)."""
+        """Return ``(left_rad, right_rad)`` averaged front/rear, or ``(None, None)``.
+
+        Returns ``(None, None)`` if any encoder is absent or a read raises, so
+        odometry can skip the tick rather than propagate a device fault.
+        """
         if any(e is None for e in self.encoders):
             return None, None
-        fl, fr, rl, rr = [e.getValue() for e in self.encoders]
+        try:
+            fl, fr, rl, rr = [e.getValue() for e in self.encoders]
+        except Exception as exc:  # noqa: BLE001 - device read barrier
+            self.log.warning("encoder read failed: %s", exc)
+            return None, None
         return 0.5 * (fl + rl), 0.5 * (fr + rr)
 
     def read_yaw(self):
-        if self.imu is not None:
+        """Return the IMU yaw in radians, or ``None`` if unavailable/faulted."""
+        if self.imu is None:
+            return None
+        try:
             return self.imu.getRollPitchYaw()[2]
-        return None
+        except Exception as exc:  # noqa: BLE001 - device read barrier
+            self.log.warning("imu read failed: %s", exc)
+            return None
 
     def read_lidar_ranges(self):
+        """Return the raw lidar range image as a float32 array, or ``None``."""
         if self.lidar is None:
             return None
-        return np.asarray(self.lidar.getRangeImage(), dtype=np.float32)
+        try:
+            return np.asarray(self.lidar.getRangeImage(), dtype=np.float32)
+        except Exception as exc:  # noqa: BLE001 - device read barrier
+            self.log.warning("lidar read failed: %s", exc)
+            return None
 
     def lidar_specs(self):
+        """Return ``(n_beams, fov, min_range, max_range)`` or ``None`` if no lidar."""
         if self.lidar is None:
             return None
         return (self.lidar.getHorizontalResolution(), self.lidar.getFov(),
                 self.lidar.getMinRange(), self.lidar.getMaxRange())
 
     def read_rgb_bgr(self):
-        """(H, W, 3) BGR uint8 array, or None."""
+        """Return the RGB camera frame as an ``(H, W, 3)`` BGR uint8 array, or ``None``."""
         if self.camera is None:
             return None
-        raw = self.camera.getImage()
-        if raw is None:
+        try:
+            raw = self.camera.getImage()
+            if raw is None:
+                return None
+            h, w = self.camera.getHeight(), self.camera.getWidth()
+            arr = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 4)
+            return arr[:, :, :3]
+        except Exception as exc:  # noqa: BLE001 - device read barrier
+            self.log.warning("rgb camera read failed: %s", exc)
             return None
-        h, w = self.camera.getHeight(), self.camera.getWidth()
-        arr = np.frombuffer(raw, dtype=np.uint8).reshape(h, w, 4)
-        return arr[:, :, :3]
 
     def read_depth(self):
+        """Return the depth range image as an ``(H, W)`` float32 array, or ``None``."""
         if self.depth is None:
             return None
-        raw = self.depth.getRangeImage()
-        if raw is None:
+        try:
+            raw = self.depth.getRangeImage()
+            if raw is None:
+                return None
+            h, w = self.depth.getHeight(), self.depth.getWidth()
+            return np.asarray(raw, dtype=np.float32).reshape(h, w)
+        except Exception as exc:  # noqa: BLE001 - device read barrier
+            self.log.warning("depth camera read failed: %s", exc)
             return None
-        h, w = self.depth.getHeight(), self.depth.getWidth()
-        return np.asarray(raw, dtype=np.float32).reshape(h, w)
 
     def camera_specs(self):
+        """Return ``(width, height, fov)`` of the RGB camera, or ``None``."""
         if self.camera is None:
             return None
         return (self.camera.getWidth(), self.camera.getHeight(), self.camera.getFov())
 
     def depth_specs(self):
+        """Return ``(width, height, fov, min_range, max_range)`` of depth, or ``None``."""
         if self.depth is None:
             return None
         try:
@@ -215,6 +284,7 @@ class RobotIO:
         return out
 
     def poll_key(self):
+        """Drain and return the set of keyboard key codes pressed this tick."""
         keys = set()
         while True:
             k = self.keyboard.getKey()

@@ -47,12 +47,12 @@ IMU_NAME_CANDIDATES = ("imu inertial_unit", "imu inertial unit", "inertial unit"
 # ===========================================================================
 # Velocity limits  (fast on straights, smooth in corners)
 # ===========================================================================
-V_MAX = 0.45                    # m/s nominal forward cap on open straights
-V_CRUISE = 0.38                 # m/s typical corridor speed
+V_MAX = 0.80                    # m/s nominal forward cap on open straights
+V_CRUISE = 0.70                 # m/s typical corridor speed
 V_MIN = 0.05                    # m/s
-W_MAX = 2.2                     # rad/s
-A_V = 0.9                       # m/s^2 translational accel cap (smoothness)
-A_W = 6.0                       # rad/s^2 angular accel cap (snappy but smooth corners)
+W_MAX = 3.5                     # rad/s
+A_V = 1.5                       # m/s^2 translational accel cap (smoothness)
+A_W = 10.0                      # rad/s^2 angular accel cap (snappy but smooth corners)
 WHEEL_ANG_MAX = V_MAX / WHEEL_RADIUS * 1.6   # rad/s saturation per wheel
 
 # ===========================================================================
@@ -200,7 +200,8 @@ GREEN_PROJECT_MAX_RANGE = 3.0   # m, drop far (noisy) green projections (keeps m
 # ===========================================================================
 # Mission / logging
 # ===========================================================================
-PILLAR_REACH_DIST = 0.46        # m, mission "reached the pillar" threshold (centre dist)
+PILLAR_REACH_DIST_BLUE = 0.75   # m, mission "reached the pillar" threshold (centre dist)
+PILLAR_REACH_DIST_YELLOW = 0.45 # m, reach threshold for yellow pillar (get closer)
 GO_FAIL_COOLDOWN_S = 2.5        # s, after a failed GO, explore this long before retry
 NO_FRONTIER_SPIN_S = 4.0        # s, spin-and-rescan when no frontier is available
 PERCEPTION_EVERY_TICKS = 2      # run colour perception every N ticks

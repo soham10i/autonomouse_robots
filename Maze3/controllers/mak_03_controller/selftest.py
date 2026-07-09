@@ -55,7 +55,7 @@ def _room_ranges(lm, half=1.7, gap=(0.6, 1.2)):
 
 
 def main():
-    print("mak_02 Maze4 selftest")
+    print("mak_03 Maze3 selftest")
     lm = LidarModel(400, 2 * math.pi, 0.2, 12.0)
     grid = OccupancyGrid()
     pose = (0.0, 0.0, 0.0)
@@ -70,12 +70,24 @@ def main():
     moved = math.hypot(corr[0], corr[1])
     check("scan-match correction is bounded", moved <= C.SM_LIN_HALF + 1e-6)
 
-    # poison patch + costmap
+    # poison patch + costmap -- confidence-gated (self-correcting against drift)
     pp = np.array([[0.5 + 0.02 * i, 0.02 * j] for i in range(-3, 4) for j in range(-3, 4)])
-    grid.add_poison_points(pp)
+    grid.add_poison_points(pp)                       # one frame
+    _, lethal1 = grid.build_costmap()
+    check("single-frame poison is NOT yet lethal (drift-gated)",
+          not lethal1[grid.world_to_grid(0.5, 0.0)])
+    for _ in range(int(C.POISON_MIN_HITS)):          # confirm over consecutive frames
+        grid.add_poison_points(pp)
     cost, lethal = grid.build_costmap()
-    check("poison created lethal cells", lethal.sum() > 0)
-    check("poison cell is lethal", lethal[grid.world_to_grid(0.5, 0.0)])
+    check("confirmed poison created lethal cells", lethal.sum() > 0)
+    check("confirmed poison cell is lethal", lethal[grid.world_to_grid(0.5, 0.0)])
+    # a one-off drift mark that is never re-seen must DECAY, not stick forever
+    grid.add_poison_points(np.array([[-0.5, 0.5]]))  # drift splash, seen once
+    for _ in range(int(C.POISON_HIT_CAP)):           # later frames do NOT re-see it
+        grid.add_poison_points(pp)
+    _, lethal2 = grid.build_costmap()
+    check("one-off drift poison decays away (not lethal)",
+          not lethal2[grid.world_to_grid(-0.5, 0.5)])
 
     # A* to a free goal, avoiding poison
     start = grid.world_to_grid(0.0, 0.0)
@@ -187,49 +199,71 @@ def main():
     _, _, hit_mask2, clear_mask2 = dm.thin_scan(depth_img2)
     # check("pixel above ROBOT_HEIGHT is excluded from hits", not bool(hit_mask2[40]))
 
-    # aux layer: a hit stamps the cell; the SAME bearing later reporting CLEAR
-    # must erase it -- this is the core anti-Maze1-bug property (no permanent
-    # "purple thickening": a clear sight-line always wins over a stale mark).
+    # PERSISTENT depth-obstacle layer: SPARSE per-column footprint marking +
+    # confidence.  A hit endpoint accumulates confidence; a CLEAR sight-line and a
+    # gentle global decay lower it; the see-through decay never reaches inside the
+    # depth blind shell -> a floating wall stays mapped through the dead zone (the
+    # floating-wall fix) while the layer cannot grow without bound (the smear fix).
+    ex, ey = 0.5, 0.0
+    b1 = np.array([0.0]); r1 = np.array([0.5])    # one hit column: bearing 0, range 0.5
+    HIT = (np.array([True]), np.array([False]))   # (hit_mask, clear_mask)
+    CLR = (np.array([False]), np.array([True]))
+
     grid2 = OccupancyGrid()
-    bearings_one = np.array([0.0])
-    hit_ranges_one = np.array([0.5])
-    hit_mask_one = np.array([True])
-    clear_mask_one = np.array([False])
-    grid2.integrate_aux((0.0, 0.0, 0.0), bearings_one, hit_ranges_one,
-                        hit_mask_one, clear_mask_one, depth_min=0.05)
-    check("aux hit stamps a cell", grid2.aux.sum() == 1)
-    ex, ey = 0.5 * math.cos(0.0), 0.5 * math.sin(0.0)
-    check("aux hit cell is at the expected world point",
-          grid2.aux[grid2.world_to_grid(ex, ey)])
+    grid2.integrate_depth_obstacles((0.0, 0.0, 0.0), b1, r1, *HIT, depth_min=0.05)
+    check("single depth frame is NOT yet lethal aux (confidence-gated)", grid2.aux.sum() == 0)
+    grid2.integrate_depth_obstacles((0.0, 0.0, 0.0), b1, r1, *HIT, depth_min=0.05)
+    check("a second consistent frame confirms the aux cell",
+          bool(grid2.aux[grid2.world_to_grid(ex, ey)]))
+    check("confirmed aux cell is lethal in the costmap",
+          grid2.build_costmap()[1][grid2.world_to_grid(ex, ey)])
 
-    # aux feeds the costmap as lethal, same as a lidar wall
-    grid2.integrate_aux((0.0, 0.0, 0.0), bearings_one, hit_ranges_one,
-                        hit_mask_one, clear_mask_one, depth_min=0.05)
-    cost2, lethal2 = grid2.build_costmap()
-    check("aux cell is lethal in the costmap", lethal2[grid2.world_to_grid(ex, ey)])
+    # PERSISTENCE (the core fix): saturate confidence, then a CLEAR sight-line
+    # (camera lost the wall in the < depth_min dead zone) must NOT erase it.
+    for _ in range(int(C.AUX_HIT_CAP)):
+        grid2.integrate_depth_obstacles((0.0, 0.0, 0.0), b1, r1, *HIT, depth_min=0.05)
+    grid2.integrate_depth_obstacles((0.0, 0.0, 0.0), b1, r1, *CLR, depth_min=0.05)
+    check("confirmed floating wall survives a CLEAR frame (blind-zone persistence)",
+          bool(grid2.aux[grid2.world_to_grid(ex, ey)]))
+    # but a genuinely-removed obstacle does eventually clear under sustained see-through
+    for _ in range(int(C.AUX_HIT_CAP / C.AUX_DECAY) + 4):
+        grid2.integrate_depth_obstacles((0.0, 0.0, 0.0), b1, r1, *CLR, depth_min=0.05)
+    check("sustained see-through eventually clears the aux mark",
+          not bool(grid2.aux[grid2.world_to_grid(ex, ey)]))
 
-    # mark_free_disc clears aux in the robot's own footprint (Maze1's "robot
-    # boxes itself in and can never erase it" failure mode)
-    grid2.mark_free_disc(ex, ey, 0.2)
-    check("mark_free_disc also clears aux in the footprint", grid2.aux.sum() == 0)
+    # DEAD-ZONE GEOMETRY (the floating-wall root cause): a confirmed cell that is
+    # now inside the < depth_min blind shell must NOT be decayed by a clear column,
+    # because the see-through ray starts at depth_min and so never reaches it.
+    grid2c = OccupancyGrid()
+    for _ in range(int(C.AUX_HIT_CAP)):
+        grid2c.integrate_depth_obstacles((0.0, 0.0, 0.0), b1, r1, *HIT, depth_min=0.05)
+    # robot has closed to 0.05 m from the (0.5,0) wall; a clear column with a 0.3 m
+    # blind range -> the decay ray starts 0.3 m AHEAD, well beyond the wall cell.
+    for _ in range(6):
+        grid2c.integrate_depth_obstacles((0.45, 0.0, 0.0), b1, r1, *CLR, depth_min=0.30)
+    check("wall inside the depth blind shell is NOT cleared on approach",
+          bool(grid2c.aux[grid2c.world_to_grid(ex, ey)]))
 
-    # depth-vs-lidar reconciliation (the boxed-in bug): a depth hit that lands on
-    # a cell the LIDAR already maps as a wall must NOT be stamped into the aux
-    # layer (else the depth duplicates every normal wall -> aux explodes to the
-    # size of the whole map -> passages choke shut).  A hit in a lidar-BLIND spot
-    # is still kept (genuine low/floating panel).
+    # mark_free_disc clears aux AND its confidence in the robot's own footprint
+    grid2b = OccupancyGrid()
+    for _ in range(2):
+        grid2b.integrate_depth_obstacles((0.0, 0.0, 0.0), b1, r1, *HIT, depth_min=0.05)
+    grid2b.mark_free_disc(ex, ey, 0.2)
+    check("mark_free_disc also clears aux in the footprint", grid2b.aux.sum() == 0)
+
+    # lidar gate (anti-smear): a hit on a cell the LIDAR already maps must NOT
+    # enter the aux layer; a hit in a lidar-BLIND spot is kept after confirmation.
     grid3 = OccupancyGrid()
-    wcx, wcy = 0.5 * math.cos(0.0), 0.5 * math.sin(0.0)   # where the hit lands
-    wix, wiy = grid3.world_to_grid(wcx, wcy)
-    grid3.L[wix, wiy] = C.L_MAX                            # lidar already sees a wall here
-    grid3.integrate_aux((0.0, 0.0, 0.0), bearings_one, hit_ranges_one,
-                        np.array([True]), np.array([False]), depth_min=0.05)
+    wix, wiy = grid3.world_to_grid(ex, ey)
+    grid3.L[wix, wiy] = C.L_MAX                   # lidar already sees a wall here
+    for _ in range(3):
+        grid3.integrate_depth_obstacles((0.0, 0.0, 0.0), b1, r1, *HIT, depth_min=0.05)
     check("depth hit on an existing lidar wall is NOT duplicated into aux",
           grid3.aux.sum() == 0)
-    grid4 = OccupancyGrid()                                # no lidar wall anywhere
-    grid4.integrate_aux((0.0, 0.0, 0.0), bearings_one, hit_ranges_one,
-                        np.array([True]), np.array([False]), depth_min=0.05)
-    check("depth hit in a lidar-blind spot is kept (real low panel)",
+    grid4 = OccupancyGrid()                       # no lidar wall anywhere
+    for _ in range(2):
+        grid4.integrate_depth_obstacles((0.0, 0.0, 0.0), b1, r1, *HIT, depth_min=0.05)
+    check("depth hit in a lidar-blind spot is kept (real floating panel)",
           grid4.aux.sum() == 1)
 
     # IR lookup-table inversion round-trips

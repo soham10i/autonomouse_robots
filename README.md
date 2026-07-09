@@ -5,6 +5,46 @@ ROSbot autonomous maze navigation in **Webots R2025a**. Robot must reach the
 without ever crossing the **green** poison patch.
 
 The detailed design rationale is in [APPROACH_REPORT.md](APPROACH_REPORT.md).
+
+## Current controllers (one per maze)
+
+Each maze world runs one tuned controller. After the fleet-wide cleanup they all
+share the same class name (**`NavigationController`**), the same Webots device
+layer (**`RobotInterface`** in `robot_io.py`), and the same enterprise-style
+observability (leveled logging + a structured `maps/run_events.jsonl` event log +
+per-stage fault barriers — see any controller's README). Each package stays fully
+self-contained so it runs standalone in Webots.
+
+| maze | controller (world binding) | notes |
+|---|---|---|
+| Maze1 | `Maze1/controllers/mak_02_controller` | full stack (lidar SLAM + depth-aux + IR bumper) |
+| Maze2 | `Maze2/controllers/mak_02_controller` | full stack, high-res 0.025 m grid |
+| Maze3 | `Maze3/controllers/mak_04_controller` | fusion: teleop-crisp map-consistent SLAM + map-based poison |
+| Maze4 | `Maze4/controllers/mak_02_controller` | full stack (reference tuning) |
+| Maze5 | `Maze5/controllers/mak_02_controller` | baseline (lidar-only; no depth-aux/IR) |
+
+Each controller has its own `README.md` with the pipeline, FSM, observability and
+validation details. Every package ships a Webots-free `selftest.py` (and, where
+applicable, `dryrun.py`) — the regression gate used throughout the cleanup.
+
+### `common/` — shared wrapper & observability (outside every maze)
+
+[`common/`](common/) sits **outside** all `Maze*/` folders and is imported by
+**none** of the running controllers, so it cannot affect the code that runs in
+Webots. It provides a uniform **`MazeControllerWrapper`** that resolves any maze
+id to its `NavigationController` and exposes **only** the shared method contract,
+plus the canonical `observability.py` that each controller vendors a copy of.
+See [`common/README.md`](common/README.md). Validate discovery with
+`python3 common/smoke_test.py`.
+
+---
+
+> **Note:** the "Phased development" material below is **legacy/historical** — it
+> describes an earlier controller lineup (`teleop_mapping`, `auto_explorer`,
+> `path_runner`, `map_runner`, `teleop_mission`, `maze_navigator`) that predates
+> the current per-maze `NavigationController` layout. It is retained for design
+> context; for how to run today, use the per-maze controllers listed above.
+
 This README covers how to run and tune the controller.
 
 ## Setup

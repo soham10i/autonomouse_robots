@@ -14,6 +14,7 @@ from geometry import wrap_angle
 
 
 class Odometry:
+    """Wheel + IMU dead-reckoning producing an (x, y, theta) pose estimate in the odometry frame."""
     def __init__(self):
         self.x = 0.0
         self.y = 0.0

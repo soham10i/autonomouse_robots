@@ -87,6 +87,7 @@ def _distance_bands(mask, max_band):
 #  Occupancy grid
 # --------------------------------------------------------------------------- #
 class OccupancyGrid:
+    """2-D log-odds occupancy map with poison/auxiliary obstacle layers, costmap construction and lidar scan-matching."""
     def __init__(self):
         self.res = C.GRID_RESOLUTION
         self.n = C.GRID_CELLS

@@ -46,6 +46,7 @@ def choose_carrot(path_world, pose, v_cur):
 #  DWA local planner
 # --------------------------------------------------------------------------- #
 class DWAPlanner:
+    """Dynamic-Window-Approach local planner: samples feasible (v, w) rollouts against the live obstacle cloud and returns the best safe command toward the carrot."""
     def __init__(self, ctrl_dt=0.032):
         self.prev_v = 0.0
         self.prev_w = 0.0

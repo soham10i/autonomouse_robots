@@ -102,9 +102,18 @@ class OccupancyGrid:
         self.ox, self.oy = C.GRID_ORIGIN
         self.L = np.zeros((self.n, self.n), dtype=np.float32)
         self.poison = np.zeros((self.n, self.n), dtype=bool)
+        # per-cell poison confidence (see add_poison_points): a cell is lethal
+        # poison only once its confidence reaches C.POISON_MIN_HITS, so transient
+        # projection-drift splashes decay away instead of sticking forever.
+        self.poison_hits = np.zeros((self.n, self.n), dtype=np.float32)
         # depth-camera auxiliary obstacle layer (NEW for Maze4) -- see module
         # docstring: boolean only, no counters, cleared by raytrace every tick.
         self.aux = np.zeros((self.n, self.n), dtype=bool)
+        # per-cell depth-obstacle CONFIDENCE (see integrate_depth_obstacles): the
+        # boolean `aux` above is just `aux_hits >= C.AUX_MIN_HITS`.  Confidence
+        # persists across the depth blind zone so floating walls are not forgotten
+        # the instant the robot gets too close to see them.
+        self.aux_hits = np.zeros((self.n, self.n), dtype=np.float32)
 
     # ----------------------------------------------------- coordinate maths
     def world_to_grid(self, wx, wy):
@@ -179,83 +188,88 @@ class OccupancyGrid:
             np.add.at(Lflat, o, C.L_OCC)
         np.clip(self.L, C.L_MIN, C.L_MAX, out=self.L)
 
-    def integrate_aux(self, pose, bearings, hit_ranges, hit_mask, clear_mask, depth_min=0.05,
-                      lidar_model=None, raw_lidar_ranges=None):
-        """Stamp/raytrace-clear the depth-aux layer from one thin scan.
+    def integrate_depth_obstacles(self, pose, bearings, hit_ranges, hit_mask, clear_mask, depth_min):
+        """Persistent, lidar-gated depth-obstacle layer (the floating-wall fix).
 
-        Per column: a HIT sets the endpoint cell occupied and clears the ray
-        from ``depth_min`` to ``range - AUX_CLEAR_MARGIN``; a CLEAR sight-line
-        clears the ray from ``depth_min`` to ``AUX_MAX_RANGE``.  Clears are
-        applied before sets so a hit's own partial-clear ray cannot erase its
-        own (farther-out) endpoint.  Columns are subsampled for speed; the
-        hit/clear classification itself (in ``depth_model.thin_scan``) already
-        ran on the full-resolution image.
+        Replaces the old per-tick raytrace-clear ``integrate_aux``.  Marking is
+        SPARSE -- one cell per bearing column at the nearest in-band hit (the
+        thin-scan footprint), NOT the dense full-surface projection: dense marking
+        plus persistence smeared the map shut in the cluttered tilted-wall cluster
+        (aux blew up to ~990 cells and boxed the robot in).  The persistence +
+        dead-zone protection below is the actual floating-wall fix; the footprint
+        is all that A*/DWA need.  Per frame, in order:
+
+        1. **GLOBAL DECAY** -- every confident cell loses ``C.AUX_GLOBAL_DECAY``.
+           This bounds total accumulation: a mark left behind (no longer seen,
+           never driven over) fades over ~10-15 s, while a wall the robot keeps in
+           view is re-reinforced faster than it decays.  It is small enough that a
+           cell confirmed to the cap right before the dead-zone approach stays
+           lethal through it.
+        2. **SEE-THROUGH DECAY** -- along columns the camera confirms clear, lose
+           ``C.AUX_DECAY``.  The decay ray STARTS at ``depth_min``, so a cell
+           inside the < depth_min blind shell is NEVER decayed: a floating wall the
+           robot has closed in on (and can no longer see) keeps its mark.
+        3. **REINFORCE** -- add ``C.AUX_HIT_INC`` at each hit-column endpoint cell,
+           but ONLY where the 2-D lidar is blind (no lidar wall within
+           ``C.AUX_LIDAR_BLIND_CELLS``) -- the anti-smear gate that keeps normal
+           full-height walls (already lidar-mapped) out of the aux layer.
+        4. **THRESHOLD** -- ``self.aux = aux_hits >= C.AUX_MIN_HITS`` (capped at
+           ``C.AUX_HIT_CAP`` so a confirmed wall rides out stray clear frames).
         """
+        hits = self.aux_hits
+        hflat = hits.reshape(-1)
+
+        # --- step 1: gentle global decay (bounds long-term accumulation)
+        nz = hflat > 0.0
+        if nz.any():
+            hflat[nz] = np.maximum(0.0, hflat[nz] - C.AUX_GLOBAL_DECAY)
+
         n_total = bearings.shape[0]
         if n_total == 0:
+            self.aux = hits >= C.AUX_MIN_HITS
             return
         if n_total > C.AUX_COL_SUBSAMPLE:
             idx = np.linspace(0, n_total - 1, C.AUX_COL_SUBSAMPLE).astype(int)
         else:
             idx = np.arange(n_total)
 
-        # Reconcile against lidar hits directly using polar ranges.
-        # A depth hit is kept ONLY if it is significantly IN FRONT of the lidar
-        # wall at the same bearing (e.g. depth=0.5m, lidar=2.0m -> floating obstacle).
-        # If it's the same range or behind, it's either the same wall or noise -> drop.
-        
-        occ_lin = []
+        # lidar-blind gate (dilated occupied mask): keep depth marks only where
+        # the 2-D lidar genuinely cannot see -- i.e. real floating/low panels.
+        blind = self.occupied_mask()
+        for _ in range(C.AUX_LIDAR_BLIND_CELLS):
+            blind = _dilate8(blind)
+
         n_cells = self.n
-        dropped_count = 0
-        raw_hits_count = 0
-        
-        has_lidar = (lidar_model is not None and raw_lidar_ranges is not None and 
-                     len(raw_lidar_ranges) == lidar_model.n)
-        
+        clear_lin = []
+        occ_lin = []
         for i in idx:
             if hit_mask[i]:
                 rng = float(hit_ranges[i])
                 bearing = float(bearings[i])
-                
-                raw_hits_count += 1
-                if has_lidar:
-                    # Find closest lidar index for this depth bearing
-                    start_angle = lidar_model.angles[0]
-                    step_angle = lidar_model.fov / max(lidar_model.n - 1, 1)
-                    idx_lidar = int(round((start_angle - bearing) / step_angle))
-                    idx_lidar = max(0, min(lidar_model.n - 1, idx_lidar))
-                    
-                    lr = float(raw_lidar_ranges[idx_lidar])
-                    # If lidar got a valid return and depth is not significantly closer, drop it
-                    if np.isfinite(lr) and lr > lidar_model.r_min:
-                        # 0.15m threshold: depth must be > 0.15m closer than lidar to survive
-                        if rng >= lr - 0.15:
-                            dropped_count += 1
-                            continue
-
+                clear_to = max(depth_min, rng - C.AUX_CLEAR_MARGIN)
+                clear_lin.append(self._ray_cells(pose, bearing, depth_min, clear_to))
                 ang = pose[2] + bearing
                 ex = pose[0] + rng * math.cos(ang)
                 ey = pose[1] + rng * math.sin(ang)
                 eix, eiy = self.world_to_grid(ex, ey)
-                if self.in_bounds(eix, eiy):
+                if self.in_bounds(eix, eiy) and not blind[eix, eiy]:
                     occ_lin.append(eix * n_cells + eiy)
+            elif clear_mask[i]:
+                clear_lin.append(self._ray_cells(pose, float(bearings[i]), depth_min, C.AUX_MAX_RANGE))
 
-        auxflat = self.aux.reshape(-1)
-        
-        # --- FAULT DETECTION SYSTEM ---
-        if dropped_count > 0 and getattr(C, 'DEBUG_AUX_DROPS', False):
-            print(f"[FAULT DETECT] Depth camera detected {raw_hits_count} obstacle points. "
-                  f"However, {dropped_count} points were DROPPED because they were NOT "
-                  f"significantly in front of the lidar wall (polar range check).")
-        # ------------------------------
+        # --- step 2: see-through decay (blind shell protected: rays start at depth_min)
+        nonempty = [c for c in clear_lin if c.size]
+        if nonempty:
+            c = np.unique(np.concatenate(nonempty))
+            hflat[c] = np.maximum(0.0, hflat[c] - C.AUX_DECAY)
 
+        # --- step 3: reinforce the sparse hit-endpoint cells (deduped per frame)
         if occ_lin:
             o = np.unique(np.asarray(occ_lin, dtype=np.int64))
-            auxflat[o] = True
-        # Retire any EXISTING aux mark the lidar has since confirmed as a normal
-        # wall (clears exact duplicates stamped before the lidar finished mapping that
-        # wall). Genuine lidar-blind low panels survive.
-        self.aux &= ~self.occupied_mask()
+            hflat[o] = np.minimum(C.AUX_HIT_CAP, hflat[o] + C.AUX_HIT_INC)
+
+        # --- step 4: boolean lethal layer
+        self.aux = hits >= C.AUX_MIN_HITS
 
     def mark_free_disc(self, wx, wy, radius):
         """Force a small disc around a known-free point to a free log-odds.
@@ -276,14 +290,36 @@ class OccupancyGrid:
         sub = self.L[x0:x1, y0:y1]
         np.minimum(sub, C.L_FREE_THRESH - 0.1, out=sub)
         self.aux[x0:x1, y0:y1] = False
+        self.aux_hits[x0:x1, y0:y1] = 0.0   # reset confidence where the robot has driven
 
     def add_poison_points(self, pts_world):
-        """Stamp camera-projected green floor points into the sticky poison layer."""
-        if pts_world.shape[0] == 0:
-            return
-        ix, iy = self.world_to_grid_arr(pts_world[:, 0], pts_world[:, 1])
-        ok = self._inb_arr(ix, iy)
-        self.poison[ix[ok], iy[ok]] = True
+        """Confidence-gated poison stamping (self-correcting against drift).
+
+        Call ONCE per perception frame with the green floor points projected this
+        frame (may be empty).  Each step: decay the confidence of every
+        not-yet-confirmed cell, then add ``C.POISON_HIT_INC`` to each cell seen
+        this frame (once per cell, not per point, so confirmation is per-FRAME not
+        per-pixel).  ``self.poison`` is the boolean lethal mask = confidence at or
+        above ``C.POISON_MIN_HITS``.  A cell seen on consecutive close frames
+        climbs to lethal and then to ``C.POISON_HIT_CAP`` (sticky); a one-off
+        projection-drift mark peaks below the threshold and fades within a couple
+        of frames, instead of smearing the map as the old write-only bitmap did.
+        """
+        hits = self.poison_hits
+        # 1) decay transient (not-yet-confirmed) confidence everywhere
+        decayable = (hits > 0.0) & (hits < C.POISON_HIT_CAP)
+        if decayable.any():
+            hits[decayable] = np.maximum(0.0, hits[decayable] - C.POISON_DECAY)
+        # 2) reinforce the cells seen this frame (deduplicated -> +INC per cell)
+        if pts_world.shape[0] > 0:
+            ix, iy = self.world_to_grid_arr(pts_world[:, 0], pts_world[:, 1])
+            ok = self._inb_arr(ix, iy)
+            if ok.any():
+                flat = np.unique(ix[ok].astype(np.int64) * self.n + iy[ok].astype(np.int64))
+                ux, uy = flat // self.n, flat % self.n
+                hits[ux, uy] = np.minimum(C.POISON_HIT_CAP, hits[ux, uy] + C.POISON_HIT_INC)
+        # 3) recompute the lethal mask
+        self.poison = hits >= C.POISON_MIN_HITS
 
     # --------------------------------------------------------------- masks
     def occupied_mask(self):
@@ -380,12 +416,15 @@ class OccupancyGrid:
         score, dx, dy, dth = best
         hit_frac = score / max(m, 1)
         correction = math.hypot(dx, dy)
-        
+
+        # Maze3-local acceptance (kept across the aux/poison port): a strong match
+        # is trusted unconditionally; a marginal one is accepted only if it asks
+        # for a tiny shift, so a low-information corridor cannot slide the pose.
         if hit_frac >= C.SM_TRUST_HIT_FRAC:
             return (px + dx, py + dy, wrap_angle(pth + dth)), hit_frac
         if hit_frac >= C.SM_MIN_HIT_FRAC and correction <= C.SM_MARGINAL_MAX_CORR:
             return (px + dx, py + dy, wrap_angle(pth + dth)), hit_frac
-            
+
         return pred_pose, hit_frac
 
     # -------------------------------------------------------------- costmap

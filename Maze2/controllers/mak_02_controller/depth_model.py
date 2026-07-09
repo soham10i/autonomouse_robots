@@ -30,6 +30,7 @@ import config as C
 
 
 class DepthModel:
+    """Projects a depth image into a body-frame thin-scan of low-panel obstacle hits inside the robot's collision height band."""
     def __init__(self, width, height, fov, mount_z=None, depth_min=0.05, depth_max=10.0):
         self.w = int(width)
         self.h = int(height)

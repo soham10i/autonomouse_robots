@@ -181,9 +181,9 @@ AUX_LIDAR_BLIND_CELLS = 6        # a dense depth hit is kept ONLY where the 2-D 
 AUX_HIT_INC = 2.0               # confidence added to a lidar-blind in-band hit cell per frame
 AUX_DECAY = 0.5                # confidence removed per frame a cell is seen CLEAR (slow ->
                                # a confirmed wall persists through the dead-zone approach)
-AUX_GLOBAL_DECAY = 0.04       # confidence removed from EVERY confident cell each frame -- the
+AUX_GLOBAL_DECAY = 0.005       # confidence removed from EVERY confident cell each frame -- the
                                # accumulation bound: a mark left behind (no longer seen, never
-                               # driven over) fades in ~10-15 s, so the layer cannot grow
+                               # driven over) fades in ~80-100 s, so the layer cannot grow
                                # without limit and smear the map shut (the boxed-in failure);
                                # small enough that a cap-confirmed wall stays lethal through
                                # the ~2-3 s dead-zone approach.
@@ -376,7 +376,7 @@ PILLAR_RADIUS = 0.10            # m
 PILLAR_HEIGHT = 0.40            # m
 PILLAR_MIN_PIXELS = 6           # min coloured blob area (lowered: detect at longer range)
 PILLAR_MAX_DETECT_RANGE = 5.0   # m
-PILLAR_HEIGHT_MIN_FRAC = 0.15   # accept more height variance at long range
+PILLAR_HEIGHT_MIN_FRAC = 0.02   # accept more height variance at long range / when occluded by walls
 PILLAR_HEIGHT_MAX_FRAC = 2.00
 PILLAR_ASPECT_MAX = 2.2         # reject wide blobs (walls share the colour rarely)
 PILLAR_OBS_AVG_N = 3            # running mean window for world position (lowered: confirm faster)
@@ -412,7 +412,7 @@ POISON_HIT_CAP = 8.0           # confidence ceiling; a cell here is confirmed ->
 # ===========================================================================
 # Mission / logging
 # ===========================================================================
-PILLAR_REACH_DIST = 0.35        # m, mission "reached the pillar" threshold (centre dist)
+PILLAR_REACH_DIST = 0.55        # m, mission "reached the pillar" threshold (centre dist)
 GO_FAIL_COOLDOWN_S = 2.5        # s, after a failed GO, explore this long before retry
 NO_FRONTIER_SPIN_S = 4.0        # s, spin-and-rescan when no frontier is available
 PERCEPTION_EVERY_TICKS = 2      # run colour perception every N ticks

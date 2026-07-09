@@ -31,7 +31,7 @@ Rosbot {
   hidden rotation_5 0 -0.9999999999999999 0 2.9871512923386865
   translation -0.679799 1.23818 -0.00198348
   rotation -0.0019791697613292525 0.002885139652077123 0.999993879409391 1.51216
-  controller "controller_03"
+  controller "mak_02_controller"
 }
 Solid {
   translation 0.130016 1.25 0.18

@@ -41,13 +41,39 @@ Mission FSM:
 `INIT_SCAN → EXPLORE_BLUE → GO_BLUE → EXPLORE_YELLOW → GO_YELLOW → DONE`
 (`RECOVERY` is reachable from any driving state).
 
+## Code structure & uniform interface
+
+The controller class is **`NavigationController`** (identical name in every maze),
+exposing a uniform method surface — `update_sensing`, `run_slam_step`,
+`update_perception`, `refresh_costmap`, `plan_path_to`, `select_frontier_goal`,
+`drive_along_path`, `step_mission`, `finalize`, `run`. The Webots device layer is
+**`RobotInterface`** (`robot_io.py`), the only simulator-facing module. This
+shared contract is what the fleet-wide wrapper in `../../../common/` drives; the
+controller itself does not import that package, so it stays self-contained.
+
+## Observability & fault handling (enterprise-style tracing)
+
+- **Console logs** via the `logging` module (`navctl.maze5`) — leveled,
+  timestamped versions of the operator messages the controller always printed.
+- **Structured run log** at `maps/run_events.jsonl`, one JSON object per line:
+  `run_start` (with the device inventory), mission `state_transition`s,
+  `pillar_reached` splits, `recovery_enter`, `status` heartbeats, `fault`
+  records (with tracebacks), the `timing_table`, and `run_end`.
+- **Fault isolation**: every control-loop stage runs inside a `guarded_stage`
+  barrier, so an exception in one stage is logged with tick/state context and the
+  loop continues with the last safe command instead of aborting. `RobotInterface`
+  reads are individually guarded, and a top-level safety net guarantees the
+  wheels are stopped if the controller ever crashes. Provided by the vendored
+  `observability.py` (a copy of `../../../common/observability.py`).
+
 ## Files
 
 | file | role |
 |------|------|
-| `mak_02_controller.py` | mission FSM + main loop (orchestrator) |
+| `mak_02_controller.py` | `NavigationController` — mission FSM + main loop (orchestrator) |
 | `config.py` | **all** tunable constants (single source of truth) |
-| `robot_io.py` | the only Webots-facing module (devices, I/O) |
+| `robot_io.py` | `RobotInterface` — the only Webots-facing module (devices, I/O) |
+| `observability.py` | logging + JSONL event log + per-stage fault barriers (vendored) |
 | `geometry.py` | SE(2) pose maths + diff-drive kinematics |
 | `odometry.py` | wheel + IMU-yaw odometry |
 | `mapping.py` | occupancy grid, scan matcher, poison layer, costmap |
@@ -59,7 +85,8 @@ Mission FSM:
 | `selftest.py` | Webots-free pipeline self-test (no GUI needed) |
 
 Outputs are written to `maps/`: `live_map.png` (updated during the run),
-`final_map.png`, and `map.npz` (`L` log-odds grid + `poison` mask).
+`final_map.png`, `map.npz` (`L` log-odds grid + `poison` mask), and
+`run_events.jsonl` (structured runtime telemetry).
 
 ## Tuning
 

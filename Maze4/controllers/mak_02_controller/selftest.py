@@ -270,8 +270,8 @@ def main():
         _progress_ref_t = 0.0
 
     probe = _StuckProbe()
-    probe._reset_progress = M.Mak02Controller._reset_progress.__get__(probe)
-    is_stuck = M.Mak02Controller._is_stuck.__get__(probe)
+    probe._reset_progress = M.NavigationController._reset_progress.__get__(probe)
+    is_stuck = M.NavigationController._is_stuck.__get__(probe)
     check("stuck watchdog: false before any reference is set", not is_stuck(0.0))
     t = 0.0
     spinning_was_caught = False

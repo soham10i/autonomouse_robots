@@ -130,6 +130,7 @@ class Mak03Controller:
         self.tick = 0
         self._last_snapshot_t = -1e9
         self.green_block = False
+        self._green_streak = 0       # consecutive frames the imminent-green reflex fired
         self.ir_block = False
         self.outdir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                    C.OUTPUT_DIRNAME)
@@ -183,14 +184,22 @@ class Mak03Controller:
         self.percep.update_pillars(bgr, depth, self.pose)
         green_world = self.percep.green_floor_world(bgr, self.pose)
         self.grid.add_poison_points(green_world)
-        self.green_block = self.percep.green_reflex(bgr)
+        # multi-frame confirmation: a single drift splash must not freeze us
+        if self.percep.green_reflex(bgr):
+            self._green_streak += 1
+        else:
+            self._green_streak = 0
+        self.green_block = self._green_streak >= C.GREEN_REFLEX_CONFIRM_FRAMES
 
     def _depth_aux_step(self):
-        """Thin-scan the depth image and raytrace-update the aux obstacle layer.
+        """Update the PERSISTENT depth-obstacle (aux) layer from the depth image.
 
-        See mapping.OccupancyGrid.integrate_aux + the module docstring for why
-        this is hit/clear only (no sticky counters, no decay) — that is the
-        deliberate fix for the bug history documented in Maze1's HANDOFF.md.
+        In-band hits reinforce a per-cell confidence where the 2-D lidar is
+        blind; clear sight-lines only DECAY it, and the decay never reaches
+        inside the < 0.6 m depth blind shell -- so a floating wall stays mapped
+        through the dead zone where neither sensor can see it (the floating-wall
+        fix).  A gentle global decay bounds the layer so it cannot smear shut.
+        See mapping.OccupancyGrid.integrate_depth_obstacles.
         """
         if self.depth_model is None:
             return
@@ -198,8 +207,8 @@ class Mak03Controller:
         if depth is None:
             return
         bearings, hit_ranges, hit_mask, clear_mask = self.depth_model.thin_scan(depth)
-        self.grid.integrate_aux(self.pose, bearings, hit_ranges, hit_mask, clear_mask,
-                                self.depth_model.depth_min, self.lidar, self.raw_lidar_ranges)
+        self.grid.integrate_depth_obstacles(self.pose, bearings, hit_ranges,
+                                            hit_mask, clear_mask, self.depth_model.depth_min)
 
     def _ir_step(self):
         """Close-range chassis-IR hard-stop, independent of mapping (last resort

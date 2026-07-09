@@ -122,24 +122,56 @@ LIDAR_MAX_INTEGRATE = 5.0       # m, do not map endpoints beyond this (keeps map
 # higher than ROBOT_HEIGHT are passages the robot could drive under (none exist
 # in Maze4 today, but the classifier stays generically correct for any future
 # map that does have one).
-AUX_Z_MIN = 0.01                # m above floor -- lowered to catch WallShort(15) at z=0.015
-AUX_Z_MAX = 0.40                 # m; higher pixels are passable
-AUX_MAX_RANGE = 1.0              # m; drop far/noisy depth pixels (tighter = fewer false aux marks)
-AUX_CLEAR_MARGIN = 0.05          # m; stop raytrace-clearing this short of a hit
-DEBUG_AUX_DROPS = True           # FAULT DETECTION: log when aux hits are filtered by lidar blind mask
-AUX_COL_SUBSAMPLE = 120          # cap depth-image columns rasterised per tick (speed)
-# Keep NO sticky-hit counters and NO decay (those were Maze1's "purple
-# thickening" source) -- but the depth layer MUST still be reconciled against
-# the lidar.  The depth camera sees the chassis band of NORMAL full-height walls
-# too, so stamping every depth hit duplicates the ENTIRE lidar wall map into the
-# aux layer (observed: aux grew to ~920 cells, == the whole occ map), thickening
-# every 0.39 m passage into a wall and boxing the robot in -- the depth's 0.6 m
-# MIN RANGE then can't re-clear a wall the robot threads at ~0.19 m, so it never
-# recovers.  Fix (ported from Maze1's _local_obstacles_body): a depth hit becomes
-# an aux obstacle ONLY where the 2-D lidar is genuinely blind -- no lidar-occupied
-# cell within AUX_LIDAR_BLIND_CELLS.  That keeps the real low panels (WallShort
-# 15/16/18) while dropping the duplicate normal-wall marks.
-AUX_LIDAR_BLIND_CELLS = 4        # skip a depth hit within this many cells of a lidar wall
+AUX_Z_MIN = 0.01                # m above floor -- low enough to catch near-floor panels
+AUX_Z_MAX = ROBOT_HEIGHT         # m (0.22); higher pixels are PASSABLE (drive-under).
+                                 # Was 0.40 -- but Maze3's world has two genuine PASS-UNDER
+                                 # bridges fully above the 0.22 m chassis: WallMedium(31)
+                                 # z in [0.275,0.325] and WallMedium(32) z in [0.365,0.415].
+                                 # With the PERSISTENT aux layer the old 0.40 cap branded both
+                                 # as permanent obstacles, deleting legitimate drive-under
+                                 # routes.  Capping at ROBOT_HEIGHT excludes both bridges while
+                                 # STILL catching the real body-band floating wall beside BLUE,
+                                 # WallMedium(16) z in [0.165,0.215] (top 0.215 < 0.22).
+AUX_MAX_RANGE = 1.3              # m; mark in-band depth hits out to here.  The depth camera
+                                 # is blind < 0.6 m, so a floating wall is visible only in the
+                                 # window [0.6, AUX_MAX_RANGE]; 1.3 m gives a ~0.7 m / ~2.5 s
+                                 # confirmation window before the dead zone (enough for the
+                                 # PERSISTENT mark below to carry it through) WITHOUT marking
+                                 # far obstacles so aggressively that the layer over-grows.
+AUX_CLEAR_MARGIN = 0.05          # m; stop the see-through decay ray this short of a hit
+AUX_COL_SUBSAMPLE = 120          # cap depth-image columns used for the see-through decay rays
+AUX_LIDAR_BLIND_CELLS = 4        # a depth hit is kept ONLY where the 2-D lidar is genuinely
+                                 # blind -- no lidar-occupied cell within this many cells
+                                 # (~0.16 m at GRID_RESOLUTION 0.04).  This is the anti-smear
+                                 # gate: the depth camera also sees the chassis band of NORMAL
+                                 # full-height walls the lidar already maps; without the gate
+                                 # every wall is duplicated into aux and the map smears shut.
+
+# ---------------------------------------------------------------------------
+# Persistent depth-obstacle confidence (the floating-wall fix)
+# ---------------------------------------------------------------------------
+# ROOT CAUSE this replaces: the old aux layer raytrace-CLEARED every tick, so a
+# floating wall was ERASED the instant the robot closed inside the 0.6 m depth
+# blind zone (the column then reads "clear" through the now-invisible wall) --
+# the robot drove into walls the map had just forgotten.  Now each lidar-blind
+# in-band hit ACCUMULATES confidence; a cell is lethal aux at >= AUX_MIN_HITS and
+# saturates at AUX_HIT_CAP; a CLEAR sight-line only DECAYS confidence (by
+# AUX_DECAY) and -- crucially -- the decay ray STARTS at the depth min range, so
+# a wall that has entered the < 0.6 m dead zone is NEVER decayed.  A gentle
+# GLOBAL decay bounds total accumulation so the layer cannot grow without limit
+# and smear the map shut (the boxed-in failure).  Marking is SPARSE -- one cell
+# per bearing at the hit endpoint, NOT the dense surface -- which is all A*/DWA
+# need.  See mapping.OccupancyGrid.integrate_depth_obstacles.
+AUX_HIT_INC = 2.0               # confidence added to a lidar-blind in-band hit cell per frame
+AUX_DECAY = 0.5                 # confidence removed per frame a cell is seen CLEAR (slow ->
+                                # a confirmed wall persists through the dead-zone approach)
+AUX_GLOBAL_DECAY = 0.04         # confidence removed from EVERY confident cell each frame -- the
+                                # accumulation bound: a mark left behind (no longer seen, never
+                                # driven over) fades in ~10-15 s; small enough that a
+                                # cap-confirmed wall stays lethal through the dead-zone approach.
+AUX_MIN_HITS = 3.0              # confidence at/above which a cell is lethal aux (2-frame confirm)
+AUX_HIT_CAP = 12.0              # confidence ceiling; a confirmed wall here survives ~24 stray
+                                # clear frames (>> the few frames the dead-zone approach lasts)
 
 # ===========================================================================
 # Costmap / inflation (planning)
@@ -268,6 +300,12 @@ GREEN_REFLEX_ENABLED = True
 GREEN_REFLEX_DIST = 0.45        # m ahead; closer projected green -> block forward
 GREEN_REFLEX_HALF_W = 0.20      # m, half-width of the imminent-poison corridor
 GREEN_REFLEX_MIN_PTS = 6        # min projected green points in that box to fire
+# Multi-frame confirmation (de-latch).  Floor projection drifts on oblique views,
+# so distant green can momentarily back-project into the ahead-box and FALSE-
+# trigger the freeze.  Require the imminent-green condition to hold for this many
+# CONSECUTIVE perception frames before zeroing forward speed; a one-frame drift
+# splash no longer freezes the robot.
+GREEN_REFLEX_CONFIRM_FRAMES = 2
 
 # ===========================================================================
 # IR bumper (NEW for Maze4 -- close-range backstop for low floating panels)
@@ -323,7 +361,29 @@ PILLAR_ASPECT_MAX = 2.2         # reject wide blobs (walls share the colour rare
 PILLAR_OBS_AVG_N = 3            # running mean window for world position (lowered: confirm faster)
 PILLAR_OUTLIER_REJECT_M = 1.2   # m, discard detections this far from the mean
 GREEN_PROJECT_STRIDE = 3        # subsample factor when projecting green floor
-GREEN_PROJECT_MAX_RANGE = 3.0   # m, drop far (noisy) green projections (keeps map crisp)
+GREEN_PROJECT_MAX_RANGE = 1.2   # m, drop far (noisy) green projections.  LOWERED from 3.0:
+                                # the flat-floor back-projection error grows fast with range
+                                # (pixels near the horizon map to wildly wrong ground points),
+                                # so far green was the main source of the poison smear.  Only
+                                # close, geometrically reliable green is mapped now.
+
+# ===========================================================================
+# Poison confidence gating (self-correcting against projection drift)
+# ===========================================================================
+# The poison layer used to be a write-only sticky bitmap: every projected green
+# point set a cell forever, with no clear/decay.  Combined with the projection
+# drift above, that grew to hundreds of phantom cells smeared across the floor,
+# inflating the A* costmap until the only gaps were blocked.  Now each cell
+# ACCUMULATES confidence (POISON_HIT_INC per frame it is seen) while
+# un-reconfirmed cells DECAY (POISON_DECAY per frame), so a cell must be seen on
+# CONSECUTIVE close frames to become lethal and a one-off drift mark fades within
+# a couple of frames.  A cell that reaches POISON_HIT_CAP stops decaying (a truly
+# observed patch stays sticky).  At INC=2/DECAY=1/MIN=3: a consistently seen cell
+# is lethal after 2 frames; a single drift hit peaks at 2 (< 3) and is gone in 2.
+POISON_HIT_INC = 2.0            # confidence added to a cell each frame it is projected
+POISON_DECAY = 1.0             # confidence removed each frame from un-reconfirmed cells
+POISON_MIN_HITS = 3.0          # confidence at/above which a cell is lethal poison
+POISON_HIT_CAP = 8.0           # confidence ceiling; a cell here is confirmed -> sticky
 
 # ===========================================================================
 # Mission / logging

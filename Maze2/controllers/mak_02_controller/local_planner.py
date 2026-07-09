@@ -87,6 +87,7 @@ def choose_carrot(path_world, pose, v_cur):
 #  DWA local planner
 # --------------------------------------------------------------------------- #
 class DWAPlanner:
+    """Dynamic-Window-Approach local planner: samples feasible (v, w) rollouts against the live obstacle cloud and returns the best safe command toward the carrot."""
     def __init__(self, ctrl_dt=0.032):
         self.prev_v = 0.0
         self.prev_w = 0.0
@@ -201,8 +202,8 @@ class DWAPlanner:
                         d = float(np.min(np.hypot(obs[:, 0] - x, obs[:, 1] - y)))
                         if d < min_clear:
                             min_clear = d
-                        # Paralyze-fix: if inside safety margin, allow trajectories that improve clearance
-                        if d < C.DWA_SAFE_RADIUS and d <= initial_clear + 1e-5:
+                        # Paralyze-fix: if inside safety margin, allow trajectories that maintain or improve clearance
+                        if d < C.DWA_SAFE_RADIUS and d < initial_clear - 1e-5:
                             collide = True
                             break
                 if collide:

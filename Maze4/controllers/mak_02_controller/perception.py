@@ -44,6 +44,7 @@ def in_range(hsv, lo, hi):
 
 
 class Perception:
+    """Camera-based HSV pillar detection and green poison-floor projection into world coordinates."""
     def __init__(self, width, height, fov, mount_z=None):
         self.w = int(width)
         self.h = int(height)

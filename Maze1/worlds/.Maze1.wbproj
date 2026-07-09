@@ -6,8 +6,8 @@ minimizedPerspectives: 000000ff00000000fd00000002000000010000025000000292fc02000
 maximizedDockId: -1
 centralWidgetVisible: 1
 orthographicViewHeight: 1
-textFiles: 0 "../Maze1/controllers/teleop_mapping/teleop_mapping.py"
+textFiles: 0 "controllers/teleop_mapping/teleop_mapping.py"
 globalOptionalRendering: CoordinateSystem
 consoles: Console:All:All
 renderingDevicePerspectives: rosbot:camera depth;1;0.161696;0.768672;0
-renderingDevicePerspectives: rosbot:camera rgb;1;0.410417;0;0
+renderingDevicePerspectives: rosbot:camera rgb;1;0.410417;0.725329;0.213576
