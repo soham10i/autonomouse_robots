@@ -4,8 +4,6 @@ ROSbot autonomous maze navigation in **Webots R2025a**. Robot must reach the
 **blue** pillar first, then the **yellow** pillar, in minimum simulation time,
 without ever crossing the **green** poison patch.
 
-The detailed design rationale is in [APPROACH_REPORT.md](APPROACH_REPORT.md).
-
 ## Current controllers (one per maze)
 
 Each maze world runs one tuned controller. After the fleet-wide cleanup they all
