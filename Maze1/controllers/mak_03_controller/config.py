@@ -1,38 +1,35 @@
-"""Single source of truth for the Maze4 ROSbot controller.
+"""Single source of truth for the Maze1 ROSbot controller.
 
 No Webots import here so every algorithmic module that depends on it stays
 importable / testable outside the simulator.  Hardware-facing code lives in
 :mod:`robot_io`.
 
-Maze4 facts that drove the tuning (read directly from ``Maze4/worlds/Maze4.wbt``,
+Maze1 facts that drove the tuning (read directly from ``Maze1/worlds/Maze1.wbt``,
 verified with exact axis-angle rotation maths, not estimates):
-  * Robot start  ~ (-2.228, 2.795), yaw 150 deg.
-  * Blue pillar  ~ ( 0.44,  0.04)   (reach this first;  ~3.83 m from start)
-  * Yellow pillar~ (-2.73,  3.13)   (reach this second; ~0.60 m from start;
+  * Robot start  ~ (-0.68, 1.24), yaw ~86.7 deg (~1.512 rad).
+  * Blue pillar  ~ ( 1.28, 0.83)   (reach this first;  ~2.00 m from start)
+  * Yellow pillar~ (-0.03, 0.31)   (reach this second; ~1.13 m from start;
     time stops here)
-  * Cylinder pillars: explicit height 0.3 m, z=0.15 (fixed from the original
-    buried-at-z=-0.6 default-height-2.0 m which created phantom obstacles in
-    the lidar/costmap).  PILLAR_HEIGHT = 0.30 m.
-  * One green "poison" floor patch (vs. two in Maze5) -- otherwise identical
-    flat floor decal, no special handling needed.
-  * 45 standing walls (18 WallShort + 27 WallMedium) are the normal full-height
+  * Cylinder pillars: explicit height 0.3 m, z=0.15.  PILLAR_HEIGHT = 0.30 m.
+  * One green "poison" floor patch at (-0.05, 0.77), box 0.4x0.5x0.1 at z=-0.04
+    -- sits directly between the robot start and the Yellow pillar (~0.46 m
+    away), so poison avoidance is critical for the GO_YELLOW phase.
+  * ~14 WallShort + ~16 WallMedium standing walls are the normal full-height
     type: boxes 1.0/0.5 x 0.05 x 0.5 centred at z=0.18 -> span z in [-0.07,0.43],
-    crossing the 2-D lidar plane (z=0.10) normally, exactly like Maze5.
-  * UNLIKE Maze5: Maze4 has 4 tilted wall panels whose exact world z-span was
-    computed via Rodrigues rotation of their box corners (NOT pass-under
-    bridges -- confirmed against the world file; a genuine pass-under bridge,
-    WallMedium(32) at z in [0.365,0.415], exists in Maze3, not here):
-        WallShort(15)  z in [0.015, 0.065]  -- fully BELOW the lidar plane
-        WallMedium(14) z in [0.085, 0.135]  -- straddles the lidar plane
-        WallShort(16)  z in [0.115, 0.165]  -- fully ABOVE the lidar plane
-        WallShort(18)  z in [0.155, 0.205]  -- fully ABOVE the lidar plane
-    All 4 sit entirely inside the robot's body band [0, ROBOT_HEIGHT=0.22] so
-    none are drivable-under; the 2-D lidar partially or fully misses them
-    (WallShort(15) is invisible to it).  These are real, low, lidar-blind
-    collision hazards -> Maze4 needs the depth-camera "aux" layer that Maze5
-    deliberately omitted, PLUS the chassis-mounted IR sensors as a close-range
-    backstop for WallShort(15) (~5 cm, below where the depth camera reliably
-    resolves at close range).
+    crossing the 2-D lidar plane (z=0.10) normally.
+  * Special walls requiring depth-camera aux layer:
+        WallShort(5)   tilted panel, box 0.5x0.05x0.3 at z=0.20 -- may partly
+                       miss the 2-D lidar plane.
+        WallMedium(9)  tilted panel, box 1.0x0.05x0.3 at z=0.18 -- may partly
+                       miss the 2-D lidar plane.
+        WallMedium(24) at z=0.08, rotated ~90 deg around X -- near-floor tilted
+                       panel, partially/fully invisible to the lidar.
+  * Genuine PASS-UNDER bridge (must NOT be mapped as obstacle):
+        WallMedium(5)  at z=0.50, box 1.0x0.05x0.5 -> span z in [0.25, 0.75],
+                       bottom 0.25 > ROBOT_HEIGHT 0.22 -> robot drives under.
+                       The aux height band [AUX_Z_MIN, AUX_Z_MAX=0.22] excludes
+                       it automatically.
+  * Arena bounds roughly x in [-2.0, 2.3], y in [-1.6, 3.2] -> ~4.3 x 4.8 m.
 """
 from __future__ import annotations
 
@@ -190,10 +187,13 @@ AUX_LIDAR_BLIND_CELLS = 6        # a depth hit is kept ONLY where the 2-D lidar 
 AUX_HIT_INC = 2.0               # confidence added to a lidar-blind in-band hit cell per frame
 AUX_DECAY = 0.5                 # confidence removed per frame a cell is seen CLEAR (slow ->
                                 # a confirmed wall persists through the dead-zone approach)
-AUX_GLOBAL_DECAY = 0.04         # confidence removed from EVERY confident cell each frame -- the
+AUX_GLOBAL_DECAY = 0.01         # confidence removed from EVERY confident cell each frame -- the
                                 # accumulation bound: a mark left behind (no longer seen, never
-                                # driven over) fades in ~10-15 s; small enough that a
-                                # cap-confirmed wall stays lethal through the dead-zone approach.
+                                # driven over) fades in ~25 s (was 0.04 / ~10 s, too aggressive:
+                                # depth-confirmed floating walls decayed before the robot reached
+                                # them); small enough that a cap-confirmed wall stays lethal
+                                # through the dead-zone approach.  Aligned with Maze2/Maze4
+                                # hybrid compromise but slightly faster to clean noise.
 AUX_MIN_HITS = 3.0              # confidence at/above which a cell is lethal aux (2-frame confirm)
 AUX_HIT_CAP = 12.0              # confidence ceiling; a confirmed wall here survives ~24 stray
                                 # clear frames (>> the few frames the dead-zone approach lasts)
@@ -286,6 +286,11 @@ WAYPOINT_REACH_TOL = 0.16       # m
 GOAL_REACH_TOL = 0.16           # m
 REPLAN_PERIOD_S = 1.0           # s, global replan cadence
 PATH_SIMPLIFY = True            # line-of-sight shortcut the A* path
+CLOSE_GOAL_DIST = 1.2           # m -- paths shorter than this skip simplification entirely;
+                                 # near the goal the dense A* waypoints are essential for
+                                 # threading the final corridor; a 2-point straight-line
+                                 # collapse aims through walls and causes a GO freeze
+                                 # (adopted from the Maze4 hybrid approach)
 
 # ===========================================================================
 # DWA local planner (drives toward the carrot using LIVE lidar + aux)
@@ -332,17 +337,28 @@ DWA_SLOWDOWN_DIST = 0.38     # m, LEGACY: now only the radius for querying mappe
 DWA_SIDE_SLOW_DIST = 0.20    # m, LEGACY/unused (side slow-down cap was removed)
 
 # ===========================================================================
-# Green-poison handling (REDESIGNED -- the binary reflex is GONE)
+# Green-poison safety reflex (drift-immune, Maze2/Maze4 hybrid approach)
 # ===========================================================================
-# The old binary `green_block` reflex (hard v=0 whenever green was imminent
-# ahead) was DELETED.  It was consumed in two places at once -- inside the DWA
-# (v_top=0) AND in a controller-side override -- so it fought the planner and the
-# escape hatch could never actually move the robot; the result was the 35 s
-# freeze->reverse->refreeze wedge loop in the t=28-65 log.  With the depth-
-# validated green projection above, the mapped poison layer is accurate, and A*
-# + the DWA costmap already route around poison.  Poison avoidance now lives
-# ENTIRELY in the map (costmap below), with no separate reflex to deadlock on.
-GREEN_REFLEX_ENABLED = False    # kept only so any stray reference stays defined
+# Independent of the mapped poison layer (which A* + DWA already avoid): a true
+# last-resort guard that fires ONLY when projected green floor is IMMINENT --
+# within GREEN_REFLEX_DIST metres directly ahead in the body frame.  It must NOT
+# fire for distant poison (caused a blue->yellow deadlock on Maze5: the robot
+# faced far poison and froze even though a valid path routed around it).
+#
+# RE-ENABLED for Maze1: the green poison sits directly between start and Yellow
+# pillar (~0.46 m away).  Map-only avoidance depends on accurate projection;
+# the reflex is the backstop.  Multi-frame confirmation (from Maze2) prevents
+# false-trigger freezes from projection drift on oblique views.
+GREEN_REFLEX_ENABLED = True
+GREEN_REFLEX_DIST = 0.45        # m ahead; closer projected green -> block forward
+GREEN_REFLEX_HALF_W = 0.20      # m, half-width of the imminent-poison corridor
+GREEN_REFLEX_MIN_PTS = 6        # min projected green points in that box to fire
+# Multi-frame confirmation (de-latch).  Floor projection drifts on oblique views,
+# so distant green can momentarily back-project into the < 0.45 m ahead-box and
+# FALSE-trigger the freeze.  Require the imminent-green condition to hold for
+# this many CONSECUTIVE perception frames before zeroing forward speed; a
+# one-frame drift splash no longer freezes the robot.
+GREEN_REFLEX_CONFIRM_FRAMES = 2
 # Depth-validated green projection (see perception.green_floor_body): a green
 # pixel is mapped to poison only if its DEPTH-reconstructed 3-D height is floor
 # level and its measured range is trustworthy.  This is the fix for the poison
@@ -373,10 +389,12 @@ IR_BUMPER_STOP_DIST = 0.08      # m; any IR below this while moving forward -> v
 # Recovery (stuck handling)
 # ===========================================================================
 STUCK_PROGRESS_MIN_M = 0.07     # m progress expected per window
-STUCK_TIMEOUT_S = 5.0           # s without progress -> recovery (raised from 3.0:
-                                # old value false-triggered during legitimate frontier
-                                # re-evaluation spins and NO_FRONTIER_SPIN_S rescans)
-FROZEN_TIMEOUT_S = 8.0          # s with NO position AND NO heading change in a
+STUCK_TIMEOUT_S = 3.5           # s without progress -> recovery (reduced from 5.0:
+                                # near the poison patch the robot can spin-deadlock
+                                # for many seconds before the old 5.0 s gate fired;
+                                # 3.5 s exits the tight-corner trap faster while still
+                                # allowing a full frontier-rescan spin to complete)
+FROZEN_TIMEOUT_S = 6.0          # s with NO position AND NO heading change in a
                                 # driving state -> recovery (backstop against any
                                 # v=0,w=0 deadlock, e.g. a latched safety reflex;
                                 # must be > STUCK_TIMEOUT_S)
@@ -386,6 +404,18 @@ RECOVERY_SPIN_W = 1.5           # rad/s
 RECOVERY_SPIN_T = 1.0           # s
 RECOVERY_REAR_MIN_CLEAR = 0.25  # m; if a wall is this close behind, skip reverse
 RECOVERY_MAX_CHAIN = 4          # consecutive recoveries before a hard replan
+
+# RETURN_PATH failover (see mak_03_controller._run_recovery).  RETURN_PATH has
+# no frontier/blacklist mechanism of its own to route around a wedge the way
+# EXPLORE_BLUE/EXPLORE_YELLOW do, so reusing RECOVERY_MAX_CHAIN=4 there would
+# just re-enter the SAME dead-end breadcrumb segment forever once the chain
+# resets (recovery_return would keep pointing back at RETURN_PATH).  A lower,
+# dedicated ceiling gives the exact-retrace strategy a fair number of escape
+# attempts against a real wedge (e.g. an un-mapped low panel like
+# WallMedium(24)/WallShort(24) that the aux layer never confirmed) before
+# permanently abandoning it in favour of the proven frontier+A* pipeline that
+# already reaches BOTH pillars through tight Maze1/Maze2/Maze4 corridors.
+RETURN_PATH_MAX_RECOVERY_CHAIN = 2
 
 # ===========================================================================
 # Perception — HSV thresholds (OpenCV convention, H in [0,179])
@@ -400,11 +430,16 @@ PILLAR_RADIUS = 0.10            # m
 PILLAR_HEIGHT = 0.30            # m
 PILLAR_MIN_PIXELS = 6           # min coloured blob area (lowered: detect at longer range)
 PILLAR_MAX_DETECT_RANGE = 5.0   # m
+PILLAR_MIN_DETECT_RANGE = 0.30  # m, reject implausibly close/noisy estimates (side-view spin)
+                                # (adopted from the Maze4 hybrid approach)
 PILLAR_HEIGHT_MIN_FRAC = 0.15   # accept more height variance at long range
 PILLAR_HEIGHT_MAX_FRAC = 2.00
 PILLAR_ASPECT_MAX = 2.2         # reject wide blobs (walls share the colour rarely)
 PILLAR_OBS_AVG_N = 3            # running mean window for world position (lowered: confirm faster)
 PILLAR_OUTLIER_REJECT_M = 1.2   # m, discard detections this far from the mean
+PILLAR_FULL_VIEW_BAND_FRAC = 0.15     # fraction of bbox height sampled per band (top/mid/bottom)
+PILLAR_FULL_VIEW_COVERAGE_MIN = 0.5   # each band needs colour across >= this fraction of bbox
+                                       # width to count as "unoccluded" (see Perception._full_view)
 GREEN_PROJECT_STRIDE = 3        # subsample factor when projecting green floor
 GREEN_PROJECT_MAX_RANGE = 1.2   # m, drop far (noisy) green projections.  LOWERED from 3.0:
                                 # the flat-floor back-projection error grows fast with range
@@ -449,3 +484,18 @@ SNAPSHOT_PERIOD_S = 3.0         # s, write a map PNG this often
 LOG_EVERY_TICKS = 24
 OUTPUT_DIRNAME = "maps"
 DONE_LINGER_S = 1.5             # s to keep window after DONE
+
+# ===========================================================================
+# RETURN_PATH diagnostics (return_path_diag.py) -- OBSERVATION ONLY.
+# These constants tune what gets recorded while the robot retraces the
+# breadcrumb route back from BLUE; nothing here feeds back into steering,
+# recovery, or replanning.  Purpose: give the NEXT debugging pass an exact,
+# timestamped trail of pose/velocity/obstacle data across the stall, instead
+# of re-deriving it from the coarse mission log by hand.
+# ===========================================================================
+RETURN_DIAG_ENABLED = True
+RETURN_DIAG_LOG_EVERY_TICKS = 8     # ~0.26 s cadence in RETURN_PATH (LOG_EVERY_TICKS is 24, ~0.77 s -- too coarse to see a crawl-stall develop)
+RETURN_DIAG_STALL_V = 0.05          # m/s; cur_v below this is "not really moving"
+RETURN_DIAG_STALL_S = 5.0           # s of sustained crawl before a stall event is flagged/printed
+RETURN_DIAG_NEAR_OBS_R = 0.6        # m, query radius for reporting nearest mapped aux/poison point
+RETURN_DIAG_FWD_CONE_DEG = 45.0     # deg half-angle (body +x) for the "min lidar range ahead" figure

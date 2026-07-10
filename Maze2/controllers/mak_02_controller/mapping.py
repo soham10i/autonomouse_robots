@@ -24,7 +24,7 @@ from typing import Any, List, Optional, Tuple, Union
 import numpy as np
 
 import config as C
-from geometry import transform_points, wrap_angle, wrap_angle_arr
+from geometry import transform_points, wrap_angle
 
 
 # --------------------------------------------------------------------------- #
@@ -245,42 +245,6 @@ class OccupancyGrid:
         return (ixs[ok].astype(np.int64) * self.n + iys[ok].astype(np.int64))
 
     # ----------------------------------------------------------- integration
-    def _grazing_mask(self, pts_body: np.ndarray, ranges: np.ndarray) -> np.ndarray:
-        """True for beams that strike a surface too obliquely to trust their free ray.
-
-        On a straight surface ``r(theta) = d / cos(theta - theta0)``, so
-        ``|dr/dtheta| = r * tan(incidence)`` with incidence measured from the
-        surface normal.  Comparing the measured slope against
-        ``r * tan(LIDAR_GRAZE_MAX_DEG)`` therefore classifies each beam without
-        ever needing the surface itself.
-
-        Each beam is scored by the SMALLER of its two neighbouring slopes: at a
-        depth discontinuity (a doorway edge, a pillar rim) one side is huge while
-        the other still lies on the continuous surface, and it is that side which
-        describes the geometry the beam actually grazed.  Beams with no continuous
-        neighbour at all (isolated returns, speckle) score ``inf`` and are gated
-        out, which is the conservative choice.
-
-        Endpoint stamping is unaffected -- only the free ray is suppressed.
-
-        Args:
-            pts_body (np.ndarray): Shape (M, 2) beam endpoints in the body frame.
-            ranges (np.ndarray): Shape (M,) range per beam, index-aligned to pts_body.
-
-        Returns:
-            np.ndarray: Shape (M,) boolean mask, True where the beam is grazing.
-        """
-        m = ranges.shape[0]
-        if m < 3:
-            return np.zeros(m, dtype=bool)
-        bear = np.arctan2(pts_body[:, 1], pts_body[:, 0])
-        dth = np.abs(wrap_angle_arr(np.diff(bear)))
-        dr = np.abs(np.diff(ranges))
-        slope = dr / np.maximum(dth, 1e-9)          # |dr/dtheta| across each gap
-        inf = np.array([np.inf])
-        s = np.minimum(np.concatenate([inf, slope]), np.concatenate([slope, inf]))
-        return s > ranges * math.tan(math.radians(C.LIDAR_GRAZE_MAX_DEG))
-
     def integrate_scan(self, pose: Tuple[float, float, float], pts_body: np.ndarray, ranges: np.ndarray) -> None:
         """Ray-trace free space and stamp occupied endpoints from one scan.
 
@@ -294,7 +258,6 @@ class OccupancyGrid:
         x, y, th = pose
         pts_world = transform_points(pts_body, x, y, th)
         rix, riy = self.world_to_grid(x, y)
-        grazing = self._grazing_mask(pts_body, ranges)
 
         free_lin = []
         occ_lin = []
@@ -302,7 +265,7 @@ class OccupancyGrid:
         for k in range(pts_world.shape[0]):
             ex, ey = pts_world[k, 0], pts_world[k, 1]
             rng = ranges[k]
-            steps = 0 if grazing[k] else int(rng / self.res)
+            steps = int(rng / self.res)
             if steps > 1:
                 ts = np.arange(steps) / float(steps)  # 0..(steps-1)/steps, excl. endpoint
                 fx = x + (ex - x) * ts
@@ -317,19 +280,11 @@ class OccupancyGrid:
                     occ_lin.append(eix * n_cells + eiy)
 
         Lflat = self.L.reshape(-1)
-        o = np.unique(np.asarray(occ_lin, dtype=np.int64)) if occ_lin else np.empty((0,), dtype=np.int64)
         if free_lin:
             f = np.unique(np.concatenate(free_lin))
-            # A beam's last free sample sits ~1 cell short of its endpoint, so a
-            # near-diagonal beam routinely free-marks a cell that another beam of
-            # the SAME scan stamps occupied.  Occupied evidence wins: without this
-            # subtraction a wall cell nets only L_OCC+L_FREE per scan and hovers a
-            # single grazing ray above L_OCC_THRESH.
-            if o.size:
-                f = f[~np.isin(f, o)]
-            if f.size:
-                np.add.at(Lflat, f, C.L_FREE)
-        if o.size:
+            np.add.at(Lflat, f, C.L_FREE)
+        if occ_lin:
+            o = np.unique(np.asarray(occ_lin, dtype=np.int64))
             np.add.at(Lflat, o, C.L_OCC)
         np.clip(self.L, C.L_MIN, C.L_MAX, out=self.L)
 
@@ -424,8 +379,8 @@ class OccupancyGrid:
         # --- step 4: boolean lethal layer
         self.aux = hits >= C.AUX_MIN_HITS
 
-    def mark_free_disc(self, wx: float, wy: float, radius: float, *, clear_lidar: bool = True) -> None:
-        """Force a true disc around a known-free point to a free log-odds.
+    def mark_free_disc(self, wx: float, wy: float, radius: float) -> None:
+        """Force a small disc around a known-free point to a free log-odds.
 
         ALSO clears the aux layer in that disc: the robot is physically there,
         so that ground truth overrides any stale aux mark.  This directly
@@ -433,23 +388,11 @@ class OccupancyGrid:
         marks it could never erase by standing in/spinning through them.  Never
         touches the poison layer (poison is a real hazard regardless of the
         robot's current position).
-
-        The clamp is confined to a RADIAL mask.  Writing the whole ``ceil``ed
-        bounding box instead (the original form) reached ``r*res*sqrt(2)`` =
-        0.177 m for a 0.102 m request -- past the 0.128 m footprint and past the
-        planner's 0.12 m lethal band -- so a single call hard-erased saturated
-        wall cells the robot was merely driving beside.  That, not the log-odds
-        integration, is what made the map fade along the robot's own track.
-
+        
         Args:
             wx (float): World X coordinate.
             wy (float): World Y coordinate.
             radius (float): Clearing radius in meters.
-            clear_lidar (bool): When False, only the aux layer is cleared and the
-                lidar log-odds ``L`` is left untouched.  Callers that run every
-                control tick must use False: ``L`` is only ever rebuilt by
-                ``integrate_scan``, which is gated behind a minimum travel, so a
-                per-tick clamp on ``L`` erases far more than it restores.
         """
         cix, ciy = self.world_to_grid(wx, wy)
         r = int(math.ceil(radius / self.res))
@@ -457,16 +400,10 @@ class OccupancyGrid:
         y0, y1 = max(0, ciy - r), min(self.n, ciy + r + 1)
         if x0 >= x1 or y0 >= y1:
             return
-        gx = np.arange(x0, x1)[:, None] - cix
-        gy = np.arange(y0, y1)[None, :] - ciy
-        disc = (gx * gx + gy * gy) * (self.res * self.res) <= radius * radius
-        if clear_lidar:
-            sub = self.L[x0:x1, y0:y1]
-            np.minimum(sub, C.L_FREE_THRESH - 0.1, out=sub, where=disc)
-        aux_sub = self.aux[x0:x1, y0:y1]
-        aux_sub[disc] = False
-        hits_sub = self.aux_hits[x0:x1, y0:y1]
-        hits_sub[disc] = 0.0   # reset confidence where the robot has driven
+        sub = self.L[x0:x1, y0:y1]
+        np.minimum(sub, C.L_FREE_THRESH - 0.1, out=sub)
+        self.aux[x0:x1, y0:y1] = False
+        self.aux_hits[x0:x1, y0:y1] = 0.0   # reset confidence where the robot has driven
 
     def add_poison_points(self, pts_world: np.ndarray) -> None:
         """Confidence-gated poison stamping (self-correcting against drift).
@@ -634,11 +571,7 @@ class OccupancyGrid:
                     if sc > best[0]:
                         best = (sc, dx, dy, dth)  # type: ignore
         score, dx, dy, dth = best
-        # denominator must be the SCORED beam count, not the full cloud: `score`
-        # sums over `pts` (capped at SM_MAX_BEAMS), so dividing by `m` caps
-        # hit_frac at SM_MAX_BEAMS/m and silently rejects good matches whenever
-        # the lidar has more beams than SM_MAX_BEAMS.
-        hit_frac = score / max(pts.shape[0], 1)
+        hit_frac = score / max(m, 1)
         if hit_frac < C.SM_MIN_HIT_FRAC:
             return pred_pose, hit_frac
         return (px + dx, py + dy, wrap_angle(pth + dth)), hit_frac

@@ -8,14 +8,31 @@ candidate exploration goals; the main controller ranks them by
 from __future__ import annotations
 
 import math
+from typing import Any, Dict, List, Set, Tuple
 
 import numpy as np
+import numpy.typing as npt
 
 import config as C
 
 
-def detect_frontier_cells(grid, lethal):
-    """Return a boolean grid of frontier cells (free, touching unknown, safe)."""
+def detect_frontier_cells(grid: Any,
+                          lethal: npt.NDArray[np.bool_]) -> npt.NDArray[np.bool_]:
+    """Return a boolean grid of valid frontier cells.
+
+    A valid frontier cell must be:
+      1. Explored and free (according to ``grid.free_mask()``)
+      2. 4-adjacent to at least one unexplored cell
+      3. Safe (not marked as ``lethal``)
+
+    Args:
+        grid: The main :class:`mapping.OccupancyGrid` instance.
+        lethal: ``(N, N)`` boolean mask of impassable obstacles (to exclude
+            frontiers that lie too close to walls).
+
+    Returns:
+        ``(N, N)`` boolean mask where ``True`` marks a frontier cell.
+    """
     free = grid.free_mask()
     unknown = grid.unknown_mask()
     # a free cell adjacent (4-conn) to any unknown cell
@@ -28,18 +45,26 @@ def detect_frontier_cells(grid, lethal):
     return frontier
 
 
-def _cluster(frontier):
-    """Label 8-connected frontier clusters -> list of (cells list)."""
+def _cluster(frontier: npt.NDArray[np.bool_]) -> List[List[Tuple[int, int]]]:
+    """Extract 8-connected clusters of frontier cells.
+
+    Args:
+        frontier: ``(N, N)`` boolean mask of frontier cells.
+
+    Returns:
+        A list of clusters, where each cluster is a list of ``(x, y)`` cell
+        coordinates belonging to that connected component.
+    """
     n = frontier.shape[0]
     visited = np.zeros_like(frontier)
-    clusters = []
+    clusters: List[List[Tuple[int, int]]] = []
     xs, ys = np.nonzero(frontier)
-    cells = set(zip(xs.tolist(), ys.tolist()))
+    cells: Set[Tuple[int, int]] = set(zip(xs.tolist(), ys.tolist()))
     for seed in list(cells):
         if visited[seed]:
             continue
-        stack = [seed]
-        comp = []
+        stack: List[Tuple[int, int]] = [seed]
+        comp: List[Tuple[int, int]] = []
         visited[seed] = True
         while stack:
             cx, cy = stack.pop()
@@ -56,14 +81,35 @@ def _cluster(frontier):
     return clusters
 
 
-def find_frontiers(grid, lethal, robot_xy, start_xy, extra_radius=0.0):
-    """Return a list of candidate dicts: ``{cell, world, size}`` (filtered).
+def find_frontiers(grid: Any,
+                   lethal: npt.NDArray[np.bool_],
+                   robot_xy: Tuple[float, float],
+                   start_xy: Tuple[float, float],
+                   extra_radius: float = 0.0) -> List[Dict[str, Any]]:
+    """Return a filtered list of candidate frontier goals.
 
-    Filtered by minimum cluster size, a minimum distance from the robot, and a
-    maximum radius from the start pose (so a gap in the boundary cannot lure the
-    robot off into the unbounded floor outside the maze). ``extra_radius`` widens
-    that cap temporarily (see ``config.EXPL_RADIUS_RELAX_*``) when the caller has
-    been unable to find any in-range frontier for a while.
+    Filters raw frontier clusters by:
+      1. Minimum cluster size (rejects single-pixel noise).
+      2. Minimum distance from the robot (rejects trivial goals immediately
+         underneath the chassis).
+      3. Maximum radius from the start pose (prevents the robot from driving
+         out the maze entrance into the unbounded void).
+
+    The centroid of each surviving cluster is snapped to the nearest actual
+    cell belonging to that cluster, to ensure the exact goal coordinate is
+    guaranteed reachable (not e.g. floating in the middle of a U-shaped wall).
+
+    Args:
+        grid: The main :class:`mapping.OccupancyGrid` instance.
+        lethal: ``(N, N)`` boolean mask of impassable obstacles.
+        robot_xy: Current robot world position ``(x, y)`` in metres.
+        start_xy: Initial robot world position ``(x, y)`` in metres.
+        extra_radius: Additional meters to widen the start-radius cap
+            (used when the controller temporarily relaxes the cap).
+
+    Returns:
+        A list of dictionary descriptors for each valid frontier:
+        ``{"cell": (int, int), "world": (float, float), "size": int}``.
     """
     frontier = detect_frontier_cells(grid, lethal)
     if not frontier.any():
@@ -71,7 +117,7 @@ def find_frontiers(grid, lethal, robot_xy, start_xy, extra_radius=0.0):
     clusters = _cluster(frontier)
     rx, ry = robot_xy
     sx, sy = start_xy
-    out = []
+    out: List[Dict[str, Any]] = []
     for comp in clusters:
         if len(comp) < C.FRONTIER_MIN_CLUSTER:
             continue

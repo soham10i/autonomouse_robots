@@ -1,20 +1,43 @@
-"""A* on the costmap + line-of-sight path simplification.  Pure NumPy/stdlib."""
+"""A* on the costmap + line-of-sight path simplification.  Pure NumPy/stdlib.
+
+Performs grid-based A* search over the inflated costmap to find an optimal
+path from the robot to a target cell, respecting lethal obstacles. Includes a
+greedy line-of-sight simplifier to collapse the dense cell-by-cell path into
+a sparse polyline of safe straight segments.
+"""
 from __future__ import annotations
 
 import heapq
 import math
+from typing import Dict, List, Optional, Set, Tuple
 
 import numpy as np
+import numpy.typing as npt
 
 import config as C
 
-_SQRT2 = math.sqrt(2.0)
-_NEIGHBORS = [(-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
-              (-1, -1, _SQRT2), (-1, 1, _SQRT2), (1, -1, _SQRT2), (1, 1, _SQRT2)]
+_SQRT2: float = math.sqrt(2.0)
+_NEIGHBORS: List[Tuple[int, int, float]] = [
+    (-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
+    (-1, -1, _SQRT2), (-1, 1, _SQRT2), (1, -1, _SQRT2), (1, 1, _SQRT2)
+]
 
 
-def _nearest_free(lethal, ix, iy, max_r=12):
-    """Snap a lethal target cell to the closest non-lethal cell (spiral search)."""
+def _nearest_free(lethal: npt.NDArray[np.bool_],
+                  ix: int, iy: int, max_r: int = 12) -> Optional[Tuple[int, int]]:
+    """Snap a lethal target cell to the closest non-lethal cell.
+
+    Performs a spiral search outwards from ``(ix, iy)`` up to ``max_r`` cells.
+
+    Args:
+        lethal: ``(N, N)`` boolean mask of lethal obstacles.
+        ix: Target cell x-coordinate.
+        iy: Target cell y-coordinate.
+        max_r: Maximum search radius in cells.
+
+    Returns:
+        The nearest free cell ``(jx, jy)``, or ``None`` if none found within radius.
+    """
     n = lethal.shape[0]
     if 0 <= ix < n and 0 <= iy < n and not lethal[ix, iy]:
         return ix, iy
@@ -29,8 +52,26 @@ def _nearest_free(lethal, ix, iy, max_r=12):
     return None
 
 
-def plan(cost, lethal, start_cell, goal_cell, allow_start_lethal=True):
-    """A* from ``start_cell`` to ``goal_cell``.  Returns a list of (ix,iy) or None."""
+def plan(cost: npt.NDArray[np.floating],
+         lethal: npt.NDArray[np.bool_],
+         start_cell: Tuple[int, int],
+         goal_cell: Tuple[int, int],
+         allow_start_lethal: bool = True) -> Optional[List[Tuple[int, int]]]:
+    """A* search from ``start_cell`` to ``goal_cell``.
+
+    Args:
+        cost: ``(N, N)`` array of non-lethal traversal costs (e.g. inflation gradients).
+        lethal: ``(N, N)`` boolean mask of impassable obstacles.
+        start_cell: ``(x, y)`` origin cell.
+        goal_cell: ``(x, y)`` destination cell.
+        allow_start_lethal: If ``True``, permits the search to escape a starting
+            cell that is currently marked lethal (prevents paralysis if the
+            robot clips an obstacle).
+
+    Returns:
+        A list of contiguous ``(x, y)`` cells from start to goal inclusive, or
+        ``None`` if no path exists.
+    """
     n = cost.shape[0]
     sx, sy = start_cell
     gx, gy = goal_cell
@@ -43,16 +84,17 @@ def plan(cost, lethal, start_cell, goal_cell, allow_start_lethal=True):
 
     res = C.GRID_RESOLUTION
 
-    def h(x, y):
+    def h(x: int, y: int) -> float:
         dx, dy = abs(x - gx), abs(y - gy)
         return (max(dx, dy) + (_SQRT2 - 1.0) * min(dx, dy)) * res
 
     start = (sx, sy)
     goal = (gx, gy)
-    open_heap = [(h(sx, sy), 0.0, start)]
-    g_score = {start: 0.0}
-    came = {}
-    closed = set()
+    # heap elements: (f_score, g_score, (x, y))
+    open_heap: List[Tuple[float, float, Tuple[int, int]]] = [(h(sx, sy), 0.0, start)]
+    g_score: Dict[Tuple[int, int], float] = {start: 0.0}
+    came: Dict[Tuple[int, int], Tuple[int, int]] = {}
+    closed: Set[Tuple[int, int]] = set()
 
     while open_heap:
         _, g, cur = heapq.heappop(open_heap)
@@ -76,7 +118,7 @@ def plan(cost, lethal, start_cell, goal_cell, allow_start_lethal=True):
             nb = (nx, ny)
             if nb in closed:
                 continue
-            extra = cost[nx, ny]
+            extra = float(cost[nx, ny])
             if not math.isfinite(extra):
                 continue
             tentative = g + step * res + extra * res
@@ -87,13 +129,27 @@ def plan(cost, lethal, start_cell, goal_cell, allow_start_lethal=True):
     return None
 
 
-def _line_clear(lethal, a, b, cost=None, max_cost=None):
-    """True if the integer segment a->b crosses no lethal cell (Bresenham).
+def _line_clear(lethal: npt.NDArray[np.bool_],
+                a: Tuple[int, int], b: Tuple[int, int],
+                cost: Optional[npt.NDArray[np.floating]] = None,
+                max_cost: Optional[float] = None) -> bool:
+    """True if the integer segment ``a -> b`` crosses no lethal cell (Bresenham).
 
-    When ``cost``/``max_cost`` are given, the segment must ALSO stay in cells of
-    cost <= ``max_cost`` (i.e. genuinely open / central cells).  This stops the
-    shortcut from straightening a carefully centred path through a tight gap back
-    against a wall: a shortcut is only taken where there is room to spare.
+    When ``cost`` / ``max_cost`` are given, the segment must ALSO stay in cells
+    of ``cost <= max_cost`` (i.e. genuinely open / central cells).  This stops
+    the shortcut from straightening a carefully centred path through a tight gap
+    back against a wall: a shortcut is only taken where there is room to spare.
+
+    Args:
+        lethal: ``(N, N)`` boolean mask of impassable obstacles.
+        a: ``(x, y)`` segment start cell.
+        b: ``(x, y)`` segment end cell.
+        cost: Optional ``(N, N)`` array of traversal costs.
+        max_cost: Optional cost threshold; cells exceeding this are treated as
+            lethal for the purpose of shortcutting.
+
+    Returns:
+        ``True`` if the line segment is clear, ``False`` otherwise.
     """
     x0, y0 = a
     x1, y1 = b
@@ -106,7 +162,7 @@ def _line_clear(lethal, a, b, cost=None, max_cost=None):
     while True:
         if not (0 <= x < n and 0 <= y < n) or lethal[x, y]:
             return False
-        if cost is not None and cost[x, y] > max_cost:
+        if cost is not None and max_cost is not None and cost[x, y] > max_cost:
             return False
         if x == x1 and y == y1:
             return True
@@ -119,12 +175,23 @@ def _line_clear(lethal, a, b, cost=None, max_cost=None):
             y += sy
 
 
-def simplify(cells, lethal, cost=None):
+def simplify(cells: Optional[List[Tuple[int, int]]],
+             lethal: npt.NDArray[np.bool_],
+             cost: Optional[npt.NDArray[np.floating]] = None) -> Optional[List[Tuple[int, int]]]:
     """Greedy line-of-sight shortcut of a cell path (fewer, longer segments).
 
     Pass ``cost`` (the costmap) to keep shortcuts out of tight passages so the
     dense, centred A* path is preserved where clearance is scarce; omit it for
-    the plain lethal-only behaviour.
+    plain lethal-only behaviour.
+
+    Args:
+        cells: Contiguous list of ``(x, y)`` cells from :func:`plan`.
+        lethal: ``(N, N)`` boolean mask of impassable obstacles.
+        cost: Optional ``(N, N)`` array of traversal costs.
+
+    Returns:
+        A sparse list of ``(x, y)`` vertices defining the simplified polyline,
+        or ``None`` if the input was empty.
     """
     if not C.PATH_SIMPLIFY or cells is None or len(cells) <= 2:
         return cells

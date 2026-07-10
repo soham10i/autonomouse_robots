@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import math
 import os
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+import numpy.typing as npt
 
 import config as C
 
@@ -37,14 +39,39 @@ _C_CARROT = (230, 0, 230)
 
 
 class Visualizer:
-    """Renders the live occupancy map, costmap, planned path, frontier and pillar overlay for monitoring a run."""
-    def __init__(self, grid, scale=3):
+    """Renders the live occupancy map, costmap, planned path, and overlay items.
+
+    Converts the internal metric grids into pixel representations, draws the
+    robot pose, path, frontiers, and pillars on top, and displays it locally
+    using OpenCV (if available) or saves it to disk via PIL.
+
+    Attributes:
+        grid: The main :class:`mapping.OccupancyGrid` instance.
+        scale: Integer scale multiplier for rendering (e.g. 3x resolution).
+        window_ready: ``True`` if the live OpenCV GUI window is active.
+    """
+
+    def __init__(self, grid: Any, scale: int = 3) -> None:
+        """Initialise the visualizer.
+
+        Args:
+            grid: The main :class:`mapping.OccupancyGrid`.
+            scale: Integer scale factor to enlarge the grid cells for display.
+        """
         self.grid = grid
-        self.scale = scale
+        self.scale = int(scale)
         self.window_ready = False
 
-    # ----------------------------------------------------- world -> pixel
-    def _to_px(self, wx, wy):
+    def _to_px(self, wx: float, wy: float) -> Tuple[int, int]:
+        """Convert a world coordinate to an image pixel coordinate.
+
+        Args:
+            wx: World X coordinate.
+            wy: World Y coordinate.
+
+        Returns:
+            ``(col, row)`` image coordinates (scaled appropriately).
+        """
         g = self.grid
         ix = (wx - g.ox) / g.res
         iy = (wy - g.oy) / g.res
@@ -52,10 +79,28 @@ class Visualizer:
         row = int((g.n - 1 - iy) * self.scale)
         return col, row
 
-    def render(self, pose, frontier_mask, path_world, carrot, pillars, state, t):
+    def render(self, pose: Tuple[float, float, float],
+               frontier_mask: Optional[npt.NDArray[np.bool_]],
+               path_world: Optional[List[Tuple[float, float]]],
+               carrot: Optional[Tuple[float, float]],
+               pillars: Dict[str, Tuple[float, float]],
+               state: str, t: float) -> npt.NDArray[np.uint8]:
+        """Render the current system state into an RGB image array.
+
+        Args:
+            pose: Robot odometry pose ``(x, y, theta)``.
+            frontier_mask: Optional ``(N, N)`` boolean mask of active frontiers.
+            path_world: Optional list of ``(x, y)`` vertices defining the global path.
+            carrot: Optional ``(x, y)`` look-ahead point for local planning.
+            pillars: Dictionary of known pillar coordinates ``{"name": (x, y)}``.
+            state: String label of the current FSM state (for HUD).
+            t: Current simulation time (for HUD).
+
+        Returns:
+            ``(H, W, 3)`` RGB image array of ``uint8`` pixels.
+        """
         g = self.grid
         n = g.n
-        img = np.empty((n, n, 3), dtype=np.uint8)
         # base layers (note: array is [ix, iy]; flip iy so +y points up)
         occ = g.occupied_mask()
         free = g.free_mask()
@@ -77,7 +122,13 @@ class Visualizer:
             img = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         return img
 
-    def _draw_cv(self, bgr, pose, path_world, carrot, pillars, state, t):
+    def _draw_cv(self, bgr: npt.NDArray[np.uint8],
+                 pose: Tuple[float, float, float],
+                 path_world: Optional[List[Tuple[float, float]]],
+                 carrot: Optional[Tuple[float, float]],
+                 pillars: Dict[str, Tuple[float, float]],
+                 state: str, t: float) -> None:
+        """Draw vector overlays (path, robot, HUD) directly onto a BGR canvas using OpenCV."""
         rgb2bgr = lambda c: (c[2], c[1], c[0])
         # path
         if path_world and len(path_world) >= 2:
@@ -105,7 +156,14 @@ class Visualizer:
         cv2.putText(bgr, f"{state}  t={t:5.1f}s", (8, 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
 
-    def show(self, img):
+    def show(self, img: npt.NDArray[np.uint8]) -> None:
+        """Display an RGB image frame in a live OpenCV window.
+
+        No-op if OpenCV is unavailable or if the ``MAK02_LIVE`` env var is disabled.
+
+        Args:
+            img: ``(H, W, 3)`` RGB image array.
+        """
         if not (_LIVE and _HAVE_CV2):
             return
         try:
@@ -116,7 +174,16 @@ class Visualizer:
         except Exception:
             pass
 
-    def save(self, img, path):
+    def save(self, img: npt.NDArray[np.uint8], path: str) -> bool:
+        """Save an RGB image frame to disk as a PNG.
+
+        Args:
+            img: ``(H, W, 3)`` RGB image array.
+            path: Target file path (e.g. ``"live_map.png"``).
+
+        Returns:
+            ``True`` if saved successfully, ``False`` otherwise.
+        """
         try:
             if _HAVE_CV2:
                 cv2.imwrite(path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
@@ -130,7 +197,8 @@ class Visualizer:
         except Exception:
             return False
 
-    def close(self):
+    def close(self) -> None:
+        """Close the live OpenCV window, if open."""
         if _LIVE and _HAVE_CV2:
             try:
                 cv2.destroyAllWindows()

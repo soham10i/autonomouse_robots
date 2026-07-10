@@ -130,16 +130,6 @@ L_FREE_THRESH = -0.35           # L below this => free
 LIDAR_RANGE_MIN = 0.12          # m, drop closer beams (self-return / noise)
 LIDAR_RANGE_MAX = 8.0           # m
 LIDAR_MAX_INTEGRATE = 5.0       # m, do not map endpoints beyond this (keeps map crisp)
-LIDAR_GRAZE_MAX_DEG = 80.0      # beams striking a surface at more than this incidence
-                                # (measured from the surface NORMAL) contribute their
-                                # endpoint but NOT their free ray.  A wall face sits
-                                # mid-cell, so a near-parallel beam travels the free
-                                # sliver *inside the wall's own cell row* for up to
-                                # 0.02/tan(a) metres -- at 1 deg that free-marks ~46
-                                # wall cells while stamping just 1 occupied.  Ungated,
-                                # those misses out-vote the hits and corridor walls
-                                # erode away.  Detected per beam from |dr/dtheta|,
-                                # which equals r*tan(incidence) on a straight surface.
 
 # ===========================================================================
 # Depth-camera auxiliary obstacle layer (floating/low walls the lidar misses)
@@ -428,6 +418,14 @@ NO_FRONTIER_SPIN_S = 4.0        # s, spin-and-rescan when no frontier is availab
 PERCEPTION_EVERY_TICKS = 2      # run colour perception every N ticks
 DEPTH_AUX_EVERY_TICKS = 2       # run depth-aux processing every N ticks
 SNAPSHOT_PERIOD_S = 3.0         # s, write a map PNG this often
+# Live-map render scale (pixels per grid cell).  The occupancy grid is
+# GRID_CELLS (360) cells square, so the rendered live window / snapshot PNG is
+# GRID_CELLS * VIZ_SCALE px.  Raised from the old default 3 (1080 px) to 5
+# (1800 px) so the maze -- which only fills part of the 9 m grid -- is drawn
+# large and crisp instead of the small, blocky centre it was before.  This is
+# display-only: it does NOT change the SLAM resolution (GRID_RESOLUTION stays
+# 0.025 m/cell), so there is zero planning/perf cost, only a bigger picture.
+VIZ_SCALE = 5
 LOG_EVERY_TICKS = 24
 OUTPUT_DIRNAME = "maps"
 DONE_LINGER_S = 1.5             # s to keep window after DONE

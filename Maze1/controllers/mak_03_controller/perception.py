@@ -58,6 +58,9 @@ class Perception:
                      "yellow": deque(maxlen=C.PILLAR_OBS_AVG_N)}
         # confirmed/averaged world position of each pillar once seen
         self.pillar_world = {"blue": None, "yellow": None}
+        # True iff the LATEST sighting showed the pillar's full silhouette
+        # (top, middle and bottom bands all unbroken) -- see _full_view.
+        self.pillar_full_view = {"blue": False, "yellow": False}
 
     # ------------------------------------------------------------- depth
     def _depth_at(self, depth, u, v):
@@ -70,6 +73,35 @@ class Perception:
         return float(np.median(good)) if good.size else float("nan")
 
     # ------------------------------------------------------ pillar detect
+    @staticmethod
+    def _full_view(mask, x0, x1, y0, y1):
+        """True iff the coloured blob's silhouette is unbroken top-to-bottom.
+
+        Checks three horizontal bands (top / middle / bottom of the bbox) each
+        have colour across at least half the bbox width.  A pillar partly
+        hidden behind a wall edge or another object typically loses one band
+        (e.g. its middle or top sliced off) while the rest still passes the
+        area/aspect gates in ``_valid`` -- this catches that partial-occlusion
+        case so a distance-based "reached" check isn't trusted on a sighting
+        that isn't actually the whole pillar.
+        """
+        h = y1 - y0 + 1
+        w = x1 - x0 + 1
+        if h <= 0 or w <= 0:
+            return False
+        band_h = max(1, int(round(h * C.PILLAR_FULL_VIEW_BAND_FRAC)))
+        mid = (y0 + y1) // 2
+        bands = ((y0, y0 + band_h),
+                 (mid - band_h // 2, mid - band_h // 2 + band_h),
+                 (y1 - band_h + 1, y1 + 1))
+        for ya, yb in bands:
+            ya, yb = max(y0, ya), min(y1 + 1, yb)
+            seg = mask[ya:yb, x0:x1 + 1]
+            coverage = seg.any(axis=0).mean() if seg.size else 0.0
+            if coverage < C.PILLAR_FULL_VIEW_COVERAGE_MIN:
+                return False
+        return True
+
     def _detect_one(self, hsv, depth, lo, hi):
         mask = in_range(hsv, lo, hi)
         area = int(mask.sum())
@@ -77,8 +109,10 @@ class Perception:
             return None
         ys, xs = np.nonzero(mask)
         cu, cv = float(xs.mean()), float(ys.mean())
-        pix_h = int(ys.max() - ys.min() + 1)
-        pix_w = int(xs.max() - xs.min() + 1)
+        y0, y1 = int(ys.min()), int(ys.max())
+        x0, x1 = int(xs.min()), int(xs.max())
+        pix_h = y1 - y0 + 1
+        pix_w = x1 - x0 + 1
         aspect = (pix_w / pix_h) if pix_h > 0 else float("nan")
         rng_d = self._depth_at(depth, cu, cv)
         # range from known pillar height (works at close range where depth blinds)
@@ -89,8 +123,10 @@ class Perception:
             rng = rng_h
         est_h = (pix_h * rng / self.fx) if (np.isfinite(rng) and rng > 0) else float("nan")
         bearing = -math.atan2(cu - self.cx, self.fx)
+        full_view = self._full_view(mask, x0, x1, y0, y1)
         return {"u": cu, "v": cv, "area": area, "bearing": bearing,
-                "range": rng, "est_height": est_h, "aspect": aspect}
+                "range": rng, "est_height": est_h, "aspect": aspect,
+                "full_view": full_view}
 
     def _valid(self, det):
         if det is None:
@@ -118,8 +154,10 @@ class Perception:
         for name, (lo, hi) in (("blue", C.HSV_BLUE), ("yellow", C.HSV_YELLOW)):
             det = self._detect_one(hsv, depth, lo, hi)
             out[name] = det
-            if self._valid(det):
+            valid = self._valid(det)
+            if valid:
                 self._ingest(name, det, pose)
+            self.pillar_full_view[name] = bool(valid and det["full_view"])
         return out
 
     def _ingest(self, name, det, pose):
@@ -192,3 +230,24 @@ class Perception:
         if body.shape[0] == 0:
             return np.empty((0, 2))
         return transform_points(body, pose[0], pose[1], pose[2])
+
+    def green_reflex(self, bgr, depth):
+        """True ONLY if poison is imminent: projected green within
+        ``GREEN_REFLEX_DIST`` m directly ahead in the body frame.  Distant
+        poison must NOT trip this — it is handled by the mapped poison layer
+        + A*/DWA — otherwise the robot deadlocks facing far poison it could
+        legally route around.  Uses depth-validated projection so green-tinted
+        wall/pillar pixels above floor level are ignored.
+        """
+        if not C.GREEN_REFLEX_ENABLED:
+            return False
+        # Use a slightly extended max_range so green just outside the trigger
+        # zone is still detected; the ahead-box filter below does the real cut.
+        body = self.green_floor_body(bgr, depth,
+                                     max_range=C.GREEN_REFLEX_DIST + 0.15)
+        if body.shape[0] == 0:
+            return False
+        ahead = ((body[:, 0] > 0.05)
+                 & (body[:, 0] < C.GREEN_REFLEX_DIST)
+                 & (np.abs(body[:, 1]) < C.GREEN_REFLEX_HALF_W))
+        return int(ahead.sum()) >= C.GREEN_REFLEX_MIN_PTS

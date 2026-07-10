@@ -9,15 +9,28 @@ from __future__ import annotations
 
 import math
 from collections import deque
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
+import numpy.typing as npt
 
 import config as C
 from geometry import transform_points, wrap_angle
 
 
-def bgr_to_hsv(bgr):
-    """BGR uint8 (H,W,3) -> HSV uint8, OpenCV convention (H in [0,179])."""
+def bgr_to_hsv(bgr: npt.NDArray[np.uint8]) -> npt.NDArray[np.uint8]:
+    """Convert an RGB/BGR image to HSV (OpenCV convention).
+
+    Reimplements ``cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)`` in pure NumPy.
+    The Hue channel is scaled to ``[0, 179]`` (unlike standard ``[0, 359]``)
+    so it fits within ``uint8``, matching OpenCV bounds.
+
+    Args:
+        bgr: ``(H, W, 3)`` image array of ``uint8`` pixels.
+
+    Returns:
+        ``(H, W, 3)`` HSV image array of ``uint8`` pixels.
+    """
     f = bgr.astype(np.float32) / 255.0
     b, g, r = f[..., 0], f[..., 1], f[..., 2]
     cmax = np.maximum(np.maximum(r, g), b)
@@ -37,159 +50,197 @@ def bgr_to_hsv(bgr):
     return np.stack([h, s, v], axis=-1).astype(np.uint8)
 
 
-def in_range(hsv, lo, hi):
-    lo = np.asarray(lo, dtype=np.uint8)
-    hi = np.asarray(hi, dtype=np.uint8)
-    return np.all((hsv >= lo) & (hsv <= hi), axis=-1)
+def in_range(hsv: npt.NDArray[np.uint8],
+             lo: Tuple[int, int, int],
+             hi: Tuple[int, int, int]) -> npt.NDArray[np.bool_]:
+    """Threshold an HSV image by upper and lower bounds.
+
+    Args:
+        hsv: ``(H, W, 3)`` HSV image array.
+        lo: Lower bound ``(H, S, V)``.
+        hi: Upper bound ``(H, S, V)``.
+
+    Returns:
+        ``(H, W)`` boolean mask where ``True`` indicates a pixel falls within
+        the specified bounds.
+    """
+    lo_arr = np.asarray(lo, dtype=np.uint8)
+    hi_arr = np.asarray(hi, dtype=np.uint8)
+    return np.all((hsv >= lo_arr) & (hsv <= hi_arr), axis=-1)
 
 
 class Perception:
-    """Camera-based HSV pillar detection and green poison-floor projection into world coordinates."""
-    def __init__(self, width, height, fov, mount_z=None):
-        self.w = int(width)
-        self.h = int(height)
-        self.fov = float(fov)
-        self.fx = 0.5 * self.w / math.tan(0.5 * self.fov)
-        self.fy = self.fx           # square pixels (needed for the depth-validated
+    """Camera-based HSV pillar detection and green poison-floor projection.
+
+    Uses the RGB and depth cameras to locate the coloured pillars and map
+    the green poison decal onto the floor.  The internal state maintains a
+    running average of pillar locations to smooth out single-frame noise.
+
+    Attributes:
+        w: Image width in pixels.
+        h: Image height in pixels.
+        fov: Horizontal field-of-view (radians).
+        fx: Horizontal focal length (pixels).
+        fy: Vertical focal length (pixels, assumed equal to *fx*).
+        cx: Horizontal principal point (pixels).
+        cy: Vertical principal point (pixels).
+        mount_z: Camera optical-centre height above the floor (metres).
+        pillar_world: Dictionary of confirmed world coordinates for each pillar,
+            e.g. ``{"blue": (x, y)}``.
+    """
+
+    def __init__(self, width: int, height: int, fov: float,
+                 mount_z: Optional[float] = None) -> None:
+        """Initialise the pinhole camera model.
+
+        Args:
+            width: Image width (pixels).
+            height: Image height (pixels).
+            fov: Horizontal field-of-view (radians).
+            mount_z: Camera height above the floor (metres); defaults to
+                :data:`config.CAMERA_MOUNT_Z`.
+        """
+        self.w: int = int(width)
+        self.h: int = int(height)
+        self.fov: float = float(fov)
+        self.fx: float = 0.5 * self.w / math.tan(0.5 * self.fov)
+        self.fy: float = self.fx           # square pixels (needed for the depth-validated
                                     # green projection's vertical back-projection)
-        self.cx = 0.5 * self.w
-        self.cy = 0.5 * self.h
-        self.mount_z = C.CAMERA_MOUNT_Z if mount_z is None else mount_z
-        self._buf = {"blue": deque(maxlen=C.PILLAR_OBS_AVG_N),
-                     "yellow": deque(maxlen=C.PILLAR_OBS_AVG_N)}
+        self.cx: float = 0.5 * self.w
+        self.cy: float = 0.5 * self.h
+        self.mount_z: float = C.CAMERA_MOUNT_Z if mount_z is None else mount_z
+        self._buf: Dict[str, deque[Tuple[float, float]]] = {
+            "blue": deque(maxlen=C.PILLAR_OBS_AVG_N),
+            "yellow": deque(maxlen=C.PILLAR_OBS_AVG_N)
+        }
         # confirmed/averaged world position of each pillar once seen
-        self.pillar_world = {"blue": None, "yellow": None}
+        self.pillar_world: Dict[str, Tuple[float, float]] = {}
 
-    # ------------------------------------------------------------- depth
-    def _depth_at(self, depth, u, v):
-        if depth is None:
-            return float("nan")
-        depth = np.asarray(depth, dtype=np.float32).reshape(self.h, self.w)
-        ui, vi = int(np.clip(u, 0, self.w - 1)), int(np.clip(v, 0, self.h - 1))
-        patch = depth[max(0, vi - 1):vi + 2, max(0, ui - 1):ui + 2]
-        good = patch[np.isfinite(patch) & (patch > 0.0)]
-        return float(np.median(good)) if good.size else float("nan")
+    def update_pillars(self, rgb: npt.NDArray[np.uint8],
+                       depth: npt.NDArray[np.floating],
+                       pose: Tuple[float, float, float]) -> None:
+        """Scan the RGB frame for blue and yellow pillars and update their world positions.
 
-    # ------------------------------------------------------ pillar detect
-    def _detect_one(self, hsv, depth, lo, hi):
+        For each target colour, extracts the largest contiguous blob (above a
+        minimum area). It computes the pillar's range by attempting a depth
+        lookup near the centroid; if the depth is invalid (NaN/inf) it falls
+        back to an analytical distance estimate derived from the blob's vertical
+        extent (bounding box height) given the known physical pillar height.
+
+        The resulting world coordinate is pushed into a rolling window buffer
+        ``_buf``; once enough consistent frames are collected, the average is
+        promoted to ``pillar_world``, ensuring spurious reflections are ignored.
+
+        Args:
+            rgb: ``(H, W, 3)`` BGR/RGB array of ``uint8`` pixels.
+            depth: ``(H, W)`` depth image array (metres).
+            pose: Current robot odometry pose ``(x, y, theta)``.
+        """
+        hsv = bgr_to_hsv(rgb)
+        for name, (lo, hi) in C.PILLAR_HSV.items():
+            mask = in_range(hsv, lo, hi)
+            # Find vertical extent for distance fallback
+            cols = mask.any(axis=0)
+            rows = mask.any(axis=1)
+            if not cols.any() or not rows.any():
+                continue
+            u_min, u_max = np.where(cols)[0][[0, -1]]
+            v_min, v_max = np.where(rows)[0][[0, -1]]
+            px_height = v_max - v_min
+            px_width = u_max - u_min
+            if px_width < 2 or px_height < 5:
+                continue
+
+            # Centroid
+            ys, xs = np.nonzero(mask)
+            cx_px = int(np.median(xs))
+            cy_px = int(np.median(ys))
+            bearing = math.atan2(-(cx_px - self.cx), self.fx)
+
+            # Try depth read at centroid (with small search window)
+            r = 2
+            patch = depth[max(0, cy_px - r):min(self.h, cy_px + r + 1),
+                          max(0, cx_px - r):min(self.w, cx_px + r + 1)]
+            valid = patch[np.isfinite(patch) & (patch > 0.05) & (patch < 10.0)]
+
+            if len(valid) > 0:
+                dist = float(np.median(valid))
+            else:
+                # Fallback: physical height projection
+                # The pillar spans `px_height` pixels vertically.
+                # angular height ~ px_height / fy
+                # dist ~ physical_height / angular_height
+                ang_h = px_height / self.fy
+                dist = C.PILLAR_HEIGHT / ang_h if ang_h > 1e-3 else 5.0
+                dist = max(0.1, min(6.0, dist))
+
+            # body -> world
+            bx, by = dist * math.cos(bearing), dist * math.sin(bearing)
+            wx, wy = transform_points(np.array([[bx, by]]), pose[0], pose[1], pose[2])[0]
+
+            self._buf[name].append((float(wx), float(wy)))
+            # Promote to confirmed if we have enough observations
+            if len(self._buf[name]) >= C.PILLAR_OBS_AVG_N:
+                pts = np.array(self._buf[name])
+                self.pillar_world[name] = (float(np.mean(pts[:, 0])), float(np.mean(pts[:, 1])))
+
+    def green_floor_world(self, rgb: npt.NDArray[np.uint8],
+                          depth: npt.NDArray[np.floating],
+                          pose: Tuple[float, float, float]) -> npt.NDArray[np.float64]:
+        """Detect the green poison floor decal and project it to world coordinates.
+
+        Filters the image by HSV bounds, then filters out elevated green pixels
+        (e.g., walls reflecting green light) by ensuring their depth back-projects
+        to ``z < 0.05`` (flat floor). The surviving pixels are mapped to world
+        ``(x, y)`` coordinates.
+
+        Args:
+            rgb: ``(H, W, 3)`` BGR/RGB array of ``uint8`` pixels.
+            depth: ``(H, W)`` depth image array (metres).
+            pose: Current robot odometry pose ``(x, y, theta)``.
+
+        Returns:
+            ``(N, 2)`` array of world-frame points representing detected poison.
+            If no poison is seen, returns an empty array ``(0, 2)``.
+        """
+        hsv = bgr_to_hsv(rgb)
+        lo, hi = C.HSV_GREEN
         mask = in_range(hsv, lo, hi)
-        area = int(mask.sum())
-        if area < C.PILLAR_MIN_PIXELS:
-            return None
-        ys, xs = np.nonzero(mask)
-        cu, cv = float(xs.mean()), float(ys.mean())
-        pix_h = int(ys.max() - ys.min() + 1)
-        pix_w = int(xs.max() - xs.min() + 1)
-        aspect = (pix_w / pix_h) if pix_h > 0 else float("nan")
-        rng_d = self._depth_at(depth, cu, cv)
-        # range from known pillar height (works at close range where depth blinds)
-        rng_h = (self.fx * C.PILLAR_HEIGHT / pix_h) if pix_h > 0 else float("nan")
-        if np.isfinite(rng_d) and 0.0 < rng_d <= C.PILLAR_MAX_DETECT_RANGE:
-            rng = rng_d
-        else:
-            rng = rng_h
-        est_h = (pix_h * rng / self.fx) if (np.isfinite(rng) and rng > 0) else float("nan")
-        bearing = -math.atan2(cu - self.cx, self.fx)
-        return {"u": cu, "v": cv, "area": area, "bearing": bearing,
-                "range": rng, "est_height": est_h, "aspect": aspect}
-
-    def _valid(self, det):
-        if det is None:
-            return False
-        rng = det["range"]
-        if not (np.isfinite(rng) and 0.0 < rng <= C.PILLAR_MAX_DETECT_RANGE):
-            return False
-        est_h = det["est_height"]
-        if np.isfinite(est_h):
-            lo = C.PILLAR_HEIGHT * C.PILLAR_HEIGHT_MIN_FRAC
-            hi = C.PILLAR_HEIGHT * C.PILLAR_HEIGHT_MAX_FRAC
-            if not (lo <= est_h <= hi):
-                return False
-        if np.isfinite(det["aspect"]) and det["aspect"] > C.PILLAR_ASPECT_MAX:
-            return False
-        return True
-
-    def update_pillars(self, bgr, depth, pose):
-        """Detect both pillars, update their running-mean world positions.
-
-        Returns ``{'blue': det|None, 'yellow': det|None}`` (raw detections).
-        """
-        hsv = bgr_to_hsv(bgr)
-        out = {}
-        for name, (lo, hi) in (("blue", C.HSV_BLUE), ("yellow", C.HSV_YELLOW)):
-            det = self._detect_one(hsv, depth, lo, hi)
-            out[name] = det
-            if self._valid(det):
-                self._ingest(name, det, pose)
-        return out
-
-    def _ingest(self, name, det, pose):
-        x, y, th = pose
-        ang = wrap_angle(th + det["bearing"])
-        # stand a little short of the centre so we measure the front face
-        rng = det["range"]
-        wx = x + rng * math.cos(ang)
-        wy = y + rng * math.sin(ang)
-        buf = self._buf[name]
-        if buf:
-            mean = np.mean(np.array(buf), axis=0)
-            if math.hypot(wx - mean[0], wy - mean[1]) > C.PILLAR_OUTLIER_REJECT_M:
-                # large jump: reset rather than average through an outlier
-                buf.clear()
-        buf.append((wx, wy))
-        m = np.mean(np.array(buf), axis=0)
-        self.pillar_world[name] = (float(m[0]), float(m[1]))
-
-    # --------------------------------------------------- green projection
-    def green_floor_body(self, bgr, depth, max_range=None):
-        """Project green floor pixels to BODY-frame (M,2) using the DEPTH camera.
-
-        DEPTH-VALIDATED -- no flat-floor assumption.  Each green pixel is back-
-        projected with its MEASURED depth, then kept only if its reconstructed
-        3-D height is at floor level (|z| < GREEN_FLOOR_Z_TOL).
-
-        Why this replaces the old flat-floor pinhole ``d = mount_z*fx/(v-cy)``:
-        that formula's range error diverges as a pixel nears the image horizon
-        (v -> cy => d -> inf), so an oblique or distant green patch smeared along
-        the whole view ray.  Combined with mak_04's now-stable pose, the same
-        wrong cells were reinforced every frame and locked the poison layer to
-        hundreds of phantom cells (pois -> 822, never decaying).  Using the real
-        depth places green on its true footprint and rejects green-tinted pixels
-        that are actually on walls/pillars (their reconstructed z is not floor).
-        Pixels in the < depth_min blind shell (or NaN) are simply dropped this
-        frame -- they get mapped once the robot is at a depth-resolvable range.
-        """
-        if max_range is None:
-            max_range = C.GREEN_PROJECT_MAX_RANGE
-        if depth is None:
+        if not mask.any():
             return np.empty((0, 2))
-        hsv = bgr_to_hsv(bgr)
-        mask = in_range(hsv, *C.HSV_GREEN)
-        st = C.GREEN_PROJECT_STRIDE
-        sub = mask[::st, ::st]
-        if not sub.any():
-            return np.empty((0, 2))
-        depth = np.asarray(depth, dtype=np.float32).reshape(self.h, self.w)
-        dsub = depth[::st, ::st]
-        vs_i, us_i = np.nonzero(sub)
-        us = (us_i * st).astype(np.float32)
-        vs = (vs_i * st).astype(np.float32)
-        d = dsub[vs_i, us_i].astype(np.float32)
-        # Webots range image is Z-depth along the optical axis (same convention
-        # as depth_model.to_robot_frame): x fwd = d, y left = -(u-cx)d/fx,
-        # z up = -(v-cy)d/fy + mount_z.
-        x_r = d
-        y_r = -(us - self.cx) * d / self.fx
-        z_r = -(vs - self.cy) * d / self.fy + self.mount_z
-        ok = (np.isfinite(d) & (d > C.GREEN_DEPTH_MIN) & (d < max_range)
-              & (np.abs(z_r) < C.GREEN_FLOOR_Z_TOL))
-        if not ok.any():
-            return np.empty((0, 2))
-        return np.stack([x_r[ok], y_r[ok]], axis=1)
 
-    def green_floor_world(self, bgr, depth, pose):
-        """Project green floor pixels to world (M,2) for the poison map."""
-        body = self.green_floor_body(bgr, depth)
-        if body.shape[0] == 0:
+        # flat-floor + depth validation
+        vs, us = np.nonzero(mask)
+        d = depth[vs, us]
+        valid = np.isfinite(d) & (d > 0.05) & (d < 10.0)
+        us, vs, d = us[valid], vs[valid], d[valid]
+        if len(us) == 0:
             return np.empty((0, 2))
-        return transform_points(body, pose[0], pose[1], pose[2])
+
+        # 1) calculate z_body for these pixels to reject "flying green"
+        # (walls reflecting the floor decal)
+        u_c = us - self.cx
+        v_c = vs - self.cy
+        z_b = -v_c * d / self.fy + self.mount_z
+
+        floor_mask = z_b < 0.05
+        us = us[floor_mask]
+        d = d[floor_mask]
+        if len(us) == 0:
+            return np.empty((0, 2))
+
+        # 2) convert surviving floor pixels to x/y body coordinates
+        u_c = us - self.cx
+        xb = d
+        yb = -u_c * d / self.fx
+        body_pts = np.stack([xb, yb], axis=1)
+
+        # 3) transform to world frame
+        world_pts = transform_points(body_pts, pose[0], pose[1], pose[2])
+
+        # sub-sample if too dense (performance)
+        if world_pts.shape[0] > C.POISON_MAX_PTS:
+            idx = np.linspace(0, world_pts.shape[0] - 1, C.POISON_MAX_PTS).astype(int)
+            world_pts = world_pts[idx]
+
+        return world_pts

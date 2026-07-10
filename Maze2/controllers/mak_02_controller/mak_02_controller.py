@@ -131,7 +131,7 @@ class NavigationController:
                              "on the IR bumper only")
 
         self.local_planner = LP.DWAPlanner(ctrl_dt=self.dt)
-        self.visualizer = Visualizer(self.occupancy_grid)
+        self.visualizer = Visualizer(self.occupancy_grid, scale=C.VIZ_SCALE)
 
         # pose belief (odom frame; absolute world frame is unknown w/o supervisor)
         self.pose: Tuple[float, float, float] = (0.0, 0.0, 0.0)
@@ -217,11 +217,8 @@ class NavigationController:
         if C.SM_ENABLED:
             corrected, hit = self.occupancy_grid.scan_match(self.pose, self.scan_body)
             self.pose = corrected
-        # clear the footprint BEFORE integrating: the clamp states "no obstacle can
-        # be here, the robot is", which is only true of the pose as of this instant.
-        # Running it afterwards let it wipe walls the very scan had just confirmed.
-        self.occupancy_grid.mark_free_disc(self.pose[0], self.pose[1], C.ROBOT_RADIUS * 0.8)
         self.occupancy_grid.integrate_scan(self.pose, self.scan_body, self.scan_ranges)
+        self.occupancy_grid.mark_free_disc(self.pose[0], self.pose[1], C.ROBOT_RADIUS * 0.8)
         self._pose_at_last_integrate = self.pose
 
     def update_perception(self) -> None:
@@ -751,14 +748,9 @@ class NavigationController:
                 self._update_ir_bumper()
             with guarded_stage("costmap", self.log, self.events, **ctx):
                 self.refresh_costmap(t)
-                # keep the robot's own cell plannable in the costmap snapshot.
-                # aux-only: aux is re-reinforced every frame so a per-tick clear is
-                # cheap to undo, but L is rebuilt solely by integrate_scan (gated on
-                # SM_MIN_TRAVEL_M), so clamping L here erased walls faster than any
-                # scan could restore them.
+                # keep the robot's own cell plannable in the costmap snapshot
                 self.occupancy_grid.mark_free_disc(self.pose[0], self.pose[1],
-                                                   C.ROBOT_RADIUS * 0.8,
-                                                   clear_lidar=False)
+                                                   C.ROBOT_RADIUS * 0.8)
 
             v, w = 0.0, 0.0
             with guarded_stage("mission", self.log, self.events, **ctx):

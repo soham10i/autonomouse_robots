@@ -1,6 +1,6 @@
 # Autonomous Robots — Modularbeit (OTH Amberg-Weiden)
 
-ROSbot autonomous maze navigation in **Webots R2025a**. Robot must reach the
+RoSbot autonomous maze navigation in **Webots R2025a**. Robot must reach the
 **blue** pillar first, then the **yellow** pillar, in minimum simulation time,
 without ever crossing the **green** poison patch.
 
@@ -26,6 +26,12 @@ validation details. Every package ships a Webots-free `selftest.py` (and, where
 applicable, `dryrun.py`) — the regression gate used throughout the cleanup.
 
 ### Simulation Videos
+
+**Maze 2 Test Run:**
+
+<video src="https://github.com/soham10i/autonomouse_robots/raw/main/Maze2/Maze2_simulation_video.mp4" controls="controls" style="max-width: 100%;">
+  Your browser does not support the video tag. You can <a href="https://github.com/soham10i/autonomouse_robots/raw/main/Maze2/Maze2_simulation_video.mp4">download the video here</a>.
+</video>
 
 **Maze 3 Test Run:**
 

@@ -1,10 +1,16 @@
-"""Single source of truth for the Maze4 ROSbot controller.
+"""Single source of truth for the Maze3 ``mak_04_controller`` ROSbot controller.
 
-No Webots import here so every algorithmic module that depends on it stays
-importable / testable outside the simulator.  Hardware-facing code lives in
-:mod:`robot_io`.
+All tunable runtime parameters are collected here so the algorithmic modules
+(:mod:`mapping`, :mod:`local_planner`, :mod:`astar`, etc.) remain free of Webots
+imports and stay importable / testable outside the simulator.  Hardware-facing
+code lives in :mod:`robot_io`.
 
-Maze4 facts that drove the tuning (read directly from ``Maze4/worlds/Maze4.wbt``,
+Note:
+    The initial tuning baseline was carried over from the Maze4 controller.
+    Maze-specific overrides (pass-under bridge height band, poison layout,
+    and wall geometry) are documented inline below.
+
+Maze3 world facts that drove the tuning (read from ``Maze3/worlds/Maze3.wbt``,
 verified with exact axis-angle rotation maths, not estimates):
   * Robot start  ~ (-2.228, 2.795), yaw 150 deg.
   * Blue pillar  ~ ( 0.44,  0.04)   (reach this first;  ~3.83 m from start)

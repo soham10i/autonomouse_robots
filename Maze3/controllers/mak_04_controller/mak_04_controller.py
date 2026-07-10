@@ -1,39 +1,19 @@
-"""mak_04_controller — Maze3 navigation: teleop_mapping mapping + mak_03 strategy.
+"""
+Maze3 Navigation Controller.
 
-A fusion controller.  It keeps the mak_03 NAVIGATION strategy unchanged --
-visual-frontier exploration, A* global planning, a DWA local planner on the live
-lidar, the persistent depth "aux" layer + confidence-gated poison, recovery, and
-the BLUE->YELLOW mission FSM.  Mapping is kept teleop-crisp (raw-odom base,
-L_OCC_THRESH=0.85) but MAP-CONSISTENT for long runs:
-
-  * Lidar is integrated only after the robot has MOVED (moved_enough gate), so a
-    stationary/pivoting robot does not re-stamp free-rays through nearby walls and
-    erase them.
-  * A CONSERVATIVE scan-matcher (C.SM_ENABLED) aligns each scan to the existing
-    map before integration and accepts only confident, SMALL corrections, so walls
-    stay crisp and slow odom drift is removed without the large-jump jitter that
-    smeared earlier maps.  (Disabling it + integrating every tick let the map erase
-    its own thin walls on long pivot-heavy runs -- the Maze1 looping bug.)
-
-Mission (from Modularbeit.pdf): drive from the start to the BLUE pillar, then to
-the YELLOW pillar, in the least simulation time, without touching walls or the
-green poison floor.  No Webots Supervisor is used.
-
-FSM:  INIT_SCAN -> EXPLORE_BLUE -> GO_BLUE -> EXPLORE_YELLOW -> GO_YELLOW -> DONE
-      (RECOVERY is reachable from any driving state when progress stalls.  The
-       binary green-poison reflex was REMOVED: poison avoidance is entirely
-       map-based now -- depth-validated green projection feeds an accurate poison
-       layer that A* + the DWA costmap route around.)
-
-Run: set the Rosbot node's ``controller`` field to ``mak_04_controller`` (already
-set in Maze3.wbt).  Press 'Q' in the sim to finalise outputs early.
+This module provides a unified navigation controller integrating SLAM, 
+frontier-based exploration, A* global routing, and DWA local planning. 
+It operates a state machine to autonomously navigate the robot towards 
+successive objectives while avoiding dynamically mapped obstacles.
 """
 from __future__ import annotations
 
 import math
 import os
+from typing import Tuple, Optional, List, Callable
 
 import numpy as np
+import numpy.typing as npt
 
 import config as C
 import astar
@@ -74,7 +54,7 @@ class NavigationController:
     control logic stays simulator-agnostic and unit-testable.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Discover devices, build the pipeline, and open the run event log.
 
         Missing optional sensors (lidar/camera/depth) degrade gracefully with a
@@ -166,14 +146,13 @@ class NavigationController:
 
         self.tick = 0
         self._last_snapshot_t = -1e9
-        self.green_block = False     # retained False: the binary reflex was removed;
-                                     # poison avoidance is entirely map-based now
+        self.green_block = False     # Deprecated: poison avoidance is handled via map layer
         self.ir_block = False
 
     # ===================================================================== #
     #  Sensing & localisation
     # ===================================================================== #
-    def update_sensing(self):
+    def update_sensing(self) -> None:
         """Read wheel/IMU/lidar and advance the pose belief by one increment."""
         wl, wr = self.hardware.read_encoders()
         yaw = self.hardware.read_yaw()
@@ -196,23 +175,19 @@ class NavigationController:
             if self.raw_lidar_ranges is not None:
                 self.scan_body, self.scan_ranges = self.lidar.ranges_to_body(self.raw_lidar_ranges)
 
-    def _is_wheel_slip(self, inc):
-        """True if this tick's encoder-reported translation is almost certainly
-        slip (wheels turning while pinned against an obstacle) rather than real
-        motion, per live lidar clearance in the commanded direction of travel.
+    def _is_wheel_slip(self, inc: Tuple[float, float, float]) -> bool:
+        """
+        Detect wheel slip conditions during commanded motion.
 
-        Wheel encoders cannot distinguish "driving forward" from "wheels
-        spinning against a wall" -- they report the same delta either way. The
-        IMU-sourced heading is immune to this (Odometry.update takes yaw
-        straight from the inertial unit), but x/y translation is pure
-        differential-drive dead-reckoning and will happily integrate a phantom
-        few cm/tick forever while wedged. That phantom translation then fools
-        _has_moved_enough() into re-running scan-match + integrate_scan against
-        a predicted pose that never actually advanced, which is what smears/
-        drifts the map during a stuck episode (the log's "map got drifted").
-        This is a single-tick, sensor-grounded check -- much faster than the
-        multi-second _is_stuck()/_is_frozen() watchdogs, which exist to trigger
-        RECOVERY, not to protect the pose belief itself.
+        Evaluates translational displacement against lidar clearance in the 
+        direction of travel to filter out false odometry readings caused by 
+        collisions or traction loss.
+
+        Args:
+            inc: The positional increment (dx, dy, dtheta).
+
+        Returns:
+            bool: True if wheel slip is detected, False otherwise.
         """
         dx, dy, _ = inc
         if math.hypot(dx, dy) < 1e-4 or self.scan_body is None or self.scan_body.shape[0] == 0:
@@ -223,7 +198,7 @@ class NavigationController:
             return True
         return False
 
-    def _has_moved_enough(self):
+    def _has_moved_enough(self) -> bool:
         """True once the robot has moved/turned enough to re-integrate a scan."""
         if self._pose_at_last_integrate is None:
             return True
@@ -231,22 +206,13 @@ class NavigationController:
         return (math.hypot(dx, dy) > C.SM_MIN_TRAVEL_M or
                 abs(dth) > C.SM_MIN_TURN_RAD)
 
-    def run_slam_step(self):
-        """Map-consistent SLAM step: gated integration + conservative scan-match.
+    def run_slam_step(self) -> None:
+        """
+        Execute a single SLAM iteration with gated integration and scan matching.
 
-        Reverses the two "teleop-parity" choices that let the map erase its own
-        walls on long, pivot-heavy runs (Maze1 looping bug; latent here too):
-          * MOVED_ENOUGH GATE restored -- the scan is integrated only after the
-            robot has actually moved (C.SM_MIN_TRAVEL_M / C.SM_MIN_TURN_RAD), so a
-            stationary/pivoting robot no longer re-stamps free-rays through nearby
-            walls every tick and clears them (that pivot-erosion flooded the aux
-            layer and made the costmap oscillate).
-          * SCAN-MATCH re-enabled (C.SM_ENABLED) and CONSERVATIVE -- each scan is
-            aligned to the existing map before integration, so beams land back on
-            the SAME wall cells (reinforcing them) instead of grazing past and
-            free-clearing them, and slow odometry drift is corrected.  The matcher
-            accepts ONLY confident, SMALL corrections (see mapping.scan_match), so
-            it de-drifts without the large-jump jitter that smeared earlier maps.
+        Integrates lidar scans into the occupancy grid only after sufficient 
+        displacement to minimize local erosion. Utilizes conservative scan matching 
+        to correct odometry drift and align successive scans with the existing map.
         """
         if self.scan_body.shape[0] == 0 or not self._has_moved_enough():
             return
@@ -257,7 +223,7 @@ class NavigationController:
         self.occupancy_grid.mark_free_disc(self.pose[0], self.pose[1], C.ROBOT_RADIUS * 0.8)
         self._pose_at_last_integrate = self.pose
 
-    def update_perception(self):
+    def update_perception(self) -> None:
         """Detect pillars and the green poison floor from the RGB(-D) camera."""
         if self.perception is None:
             return
@@ -266,21 +232,17 @@ class NavigationController:
             return
         depth = self.hardware.read_depth()
         self.perception.update_pillars(bgr, depth, self.pose)
-        # Depth-validated green projection -> an ACCURATE poison footprint.  The
-        # binary green_block reflex is gone (see config); poison avoidance now
-        # lives entirely in the mapped poison layer + A*/DWA costmap.
+        # Project depth-validated green footprint onto the occupancy map layer.
         green_world = self.perception.green_floor_world(bgr, depth, self.pose)
         self.occupancy_grid.add_poison_points(green_world)
 
     def _update_depth_aux(self):
-        """Update the PERSISTENT depth-obstacle (aux) layer from the depth image.
+        """
+        Integrate depth camera readings into the auxiliary obstacle layer.
 
-        In-band hits reinforce a per-cell confidence where the 2-D lidar is
-        blind; clear sight-lines only DECAY it, and the decay never reaches
-        inside the < 0.6 m depth blind shell -- so a floating wall stays mapped
-        through the dead zone where neither sensor can see it (the floating-wall
-        fix).  A gentle global decay bounds the layer so it cannot smear shut.
-        See mapping.OccupancyGrid.integrate_depth_obstacles.
+        Maintains persistent obstacle representations for environmental features 
+        undetectable by planar lidar. Hit probabilities are reinforced by positive 
+        readings and decayed by clear sight-lines.
         """
         if self.depth_model is None:
             return
@@ -292,9 +254,12 @@ class NavigationController:
                                             hit_mask, clear_mask, self.depth_model.depth_min)
 
     def _update_ir_bumper(self):
-        """Close-range chassis-IR hard-stop, independent of mapping (last resort
-        for the lowest panel, WallShort(15), which sits below where the depth
-        camera reliably resolves at very close range)."""
+        """
+        Process infrared bumper sensor data to enforce collision prevention.
+
+        Functions as a low-level, map-independent safety mechanism for 
+        obstacles outside the depth sensor's effective range.
+        """
         if not C.IR_BUMPER_ENABLED:
             self.ir_block = False
             return
@@ -312,19 +277,10 @@ class NavigationController:
         """Rebuild the A* costmap when it is stale (or when ``force`` is set)."""
         if force or self.cost is None or (t - self._last_costmap_t) >= C.REPLAN_PERIOD_S:
             self.cost, self.lethal = self.occupancy_grid.build_costmap()
-            # ---- anti-self-boxing: the robot IS here, so clear its disc ----
-            # The lethal inflation can make the robot's own cell and all
-            # neighbours impassable (e.g. corridor walls within HARD_OBS_DIST
-            # on both sides).  When that happens A* cannot even START and
-            # select_frontier_goal() returns nothing → permanent spin deadlock.
-            # Fix: force a small disc around the robot to be non-lethal with
-            # finite (high) cost.  The DWA local planner still uses live lidar
-            # for real wall clearance, so safety is preserved.
+            # Ensure the robot's current position remains traversable in the costmap
+            # to prevent path planning deadlocks in constrained environments.
             cix, ciy = self.occupancy_grid.world_to_grid(self.pose[0], self.pose[1])
-            # Base ~0.12 m disc, widened when the robot has been frontier-starved
-            # for a while -- a false-positive poison/aux ring just past the base
-            # disc can box A* in completely with no escape (see config note on
-            # NO_FRONTIER_MAX_STRIKES).
+            # Dynamically widen the clearance radius to mitigate isolation from false-positive obstacles.
             box_m = min(0.12 + self._no_frontier_strikes * C.BOX_CLEAR_STEP_M,
                        C.BOX_CLEAR_MAX_M)
             r = max(3, int(round(box_m / self.occupancy_grid.res)))  # res-independent
@@ -348,14 +304,14 @@ class NavigationController:
         cells = astar.simplify(cells, self.lethal, self.cost)
         return [self.occupancy_grid.grid_to_world(ix, iy) for (ix, iy) in cells]
 
-    def _is_blacklisted(self, wxy):
+    def _is_blacklisted(self, wxy: Tuple[float, float]) -> bool:
         """True if the world point is near a previously-abandoned (unreachable) goal."""
         for bx, by in self.blacklist:
             if math.hypot(wxy[0] - bx, wxy[1] - by) < C.FRONTIER_BLACKLIST_R:
                 return True
         return False
 
-    def select_frontier_goal(self):
+    def select_frontier_goal(self) -> Tuple[Optional[List[Tuple[float, float]]], Optional[Tuple[float, float]]]:
         """Pick the best reachable frontier; return (path, goal_world) or (None,None)."""
         self.frontier_mask = FR.detect_frontier_cells(self.occupancy_grid, self.lethal)
         extra_r = min(self._no_frontier_strikes * C.EXPL_RADIUS_RELAX_STEP_M,
@@ -382,7 +338,7 @@ class NavigationController:
         return best[1], best[2]
 
     @staticmethod
-    def _path_length(path):
+    def _path_length(path: List[Tuple[float, float]]) -> float:
         """Total Euclidean length of a world-space polyline path."""
         return sum(math.hypot(path[i + 1][0] - path[i][0], path[i + 1][1] - path[i][1])
                    for i in range(len(path) - 1))
@@ -390,7 +346,7 @@ class NavigationController:
     # ===================================================================== #
     #  Driving
     # ===================================================================== #
-    def _mapped_obstacles_body(self):
+    def _mapped_obstacles_body(self) -> npt.NDArray[np.float64]:
         """Mapped poison + aux (low-panel) points near the robot, body frame.
 
         Folded into one array for the DWA local planner — both are static,
@@ -405,7 +361,7 @@ class NavigationController:
         world = np.concatenate(parts, axis=0)
         return inverse_transform_points(world, self.pose[0], self.pose[1], self.pose[2])
 
-    def drive_along_path(self, path, v_cap=None):
+    def drive_along_path(self, path: List[Tuple[float, float]], v_cap: Optional[float] = None) -> Tuple[float, float, bool]:
         """Carrot + DWA toward the end of ``path``; returns (v, w, near_goal)."""
         if not path:
             return 0.0, 0.0, True
@@ -419,24 +375,23 @@ class NavigationController:
     # ===================================================================== #
     #  Stuck detection & recovery
     # ===================================================================== #
-    def _reset_progress(self, t):
+    def _reset_progress(self, t: float) -> None:
         """Reset the stuck-watchdog reference to the current pose and time."""
         self._progress_ref = (self.pose[0], self.pose[1])
         self._progress_ref_t = t
 
-    def _is_stuck(self, t):
-        """Pure POSITION watchdog: no translation for STUCK_TIMEOUT_S in a
-        driving state means stuck, regardless of what is currently commanded.
+    def _is_stuck(self, t: float) -> bool:
+        """
+        Detect prolonged immobility indicating a navigation failure.
 
-        Maze1's mak_03_controller documents this exact bug under the same
-        name: its no-reachable-frontier branch used to "spin to look around"
-        WITHOUT running the stuck-check, "the permanent freeze" -- because a
-        v=0 in-place rescan spin never satisfies a forward-command gate, and
-        the heading is visibly changing every tick so a frozen-pose backstop
-        keyed on heading ALSO never fires.  Two watchdogs, both blind to the
-        one failure mode that actually happens (spin-only deadlock).  Maze1's
-        fix was to drop the forward-command requirement and key stuck-ness on
-        translation alone; ported here unchanged.
+        Monitors translational progress over a specified temporal window 
+        to trigger recovery routines if the robot fails to advance.
+
+        Args:
+            t: Current simulation time.
+
+        Returns:
+            bool: True if the robot is deemed stuck, False otherwise.
         """
         if self._progress_ref is None:
             self._reset_progress(t)
@@ -450,10 +405,19 @@ class NavigationController:
             return False
         return (t - self._progress_ref_t) > C.STUCK_TIMEOUT_S
 
-    def _is_frozen(self, t):
-        """Backstop: True if NEITHER position NOR heading has changed for too long
-        in a driving state (catches any v=0,w=0 deadlock the stuck-check misses
-        because it requires forward command)."""
+    def _is_frozen(self, t: float) -> bool:
+        """
+        Serve as a secondary deadlock detection mechanism.
+
+        Monitors both positional and angular state to identify complete 
+        stagnation, capturing edge cases not addressed by translational checks.
+
+        Args:
+            t: Current simulation time.
+
+        Returns:
+            bool: True if the robot is completely frozen, False otherwise.
+        """
         p = (self.pose[0], self.pose[1], self.pose[2])
         if self._frozen_ref is None:
             self._frozen_ref, self._frozen_t = p, t
@@ -465,7 +429,7 @@ class NavigationController:
             return False
         return (t - self._frozen_t) > C.FROZEN_TIMEOUT_S
 
-    def _enter_recovery(self, t, return_state):
+    def _enter_recovery(self, t: float, return_state: str) -> None:
         self.recovery_return = return_state
         self.state = MissionState.RECOVERY
         self.recovery_phase = "reverse"
@@ -483,7 +447,7 @@ class NavigationController:
                           phase=self.recovery_phase, rear_clear=round(rear, 3),
                           chain=self.recovery_chain)
 
-    def _run_recovery(self, t):
+    def _run_recovery(self, t: float) -> Tuple[float, float]:
         """Execute the reverse-then-spin recovery manoeuvre; return ``(v, w)``."""
         if self.recovery_phase == "reverse":
             if (t - self.recovery_t0) < C.RECOVERY_REVERSE_T and \
@@ -500,12 +464,8 @@ class NavigationController:
             if self.goal_world is not None:
                 self.blacklist.append(self.goal_world)   # give up on this goal
             else:
-                # No goal to blacklist means recovery kept firing during a
-                # frontier-starved spin (goal_world is None there) -- the old
-                # code silently did nothing in this case and the spin/recover
-                # loop repeated forever. Jump straight to max escalation so
-                # _explore()'s escape drive fires on the very next tick
-                # instead of waiting out more rescan windows.
+                # Escalate immediately if recovery loops during frontier starvation,
+                # forcing the escape drive routine on the subsequent tick.
                 self._no_frontier_strikes = C.NO_FRONTIER_MAX_STRIKES
                 self._escape_until = t + C.ESCAPE_DRIVE_T
             self.recovery_chain = 0
@@ -518,7 +478,7 @@ class NavigationController:
     # ===================================================================== #
     #  MissionState state machine
     # ===================================================================== #
-    def _try_go_to_target(self, target, go_state, t):
+    def _try_go_to_target(self, target: str, go_state: str, t: float) -> bool:
         """Switch EXPLORE->GO iff the pillar is known AND an A* path exists now."""
         pw = self.perception.pillar_world.get(target) if self.perception else None
         if pw is None or t < self.go_fail_until:
@@ -543,7 +503,7 @@ class NavigationController:
                           pillar_world=[round(pw[0], 3), round(pw[1], 3)])
         return True
 
-    def _explore(self, target, go_state, t):
+    def _explore(self, target: str, go_state: str, t: float) -> Tuple[float, float]:
         """Explore toward the target: commit to it if seen, else pick a frontier."""
         if self._try_go_to_target(target, go_state, t):
             return self.drive_along_path(self.path)[:2]
@@ -561,11 +521,8 @@ class NavigationController:
                 self._plan_stamp = t
                 self._no_frontier_strikes = 0
             else:
-                # nothing to explore: rescan in place for a while. Escalate
-                # ONCE per rescan window (not every tick -- this branch runs
-                # every tick while starved) so the search radius / anti-boxing
-                # disc widen at a bounded rate instead of jumping to max
-                # instantly (see config.NO_FRONTIER_MAX_STRIKES).
+                # Initiate localized rescanning when no valid frontiers are present.
+                # Escalates clearance radii progressively across rescan intervals.
                 if t >= self.no_frontier_until:
                     self.no_frontier_until = t + C.NO_FRONTIER_SPIN_S
                     if self._no_frontier_strikes < C.NO_FRONTIER_MAX_STRIKES:
@@ -579,14 +536,15 @@ class NavigationController:
         v, w, _ = self.drive_along_path(self.path)
         return v, w
 
-    def _escape_drive(self):
-        """Reactive, map-independent escape burst: last resort once frontier
-        search has been starved for C.NO_FRONTIER_MAX_STRIKES rescan windows.
+    def _escape_drive(self) -> Tuple[float, float]:
+        """
+        Execute a reactive escape maneuver.
 
-        Drives on LIVE lidar only (front/side clearance), bypassing the mapped
-        costmap/frontier logic that produced the starvation in the first
-        place -- guarantees the robot physically relocates instead of
-        spinning in the same spot forever.
+        Bypasses standard path planning, relying exclusively on instantaneous 
+        lidar clearance to extricate the robot from protracted navigation deadlocks.
+
+        Returns:
+            Tuple[float, float]: Linear and angular velocity commands (v, w).
         """
         front = LP.front_clearance(self.scan_body, 0.16)
         side = LP.freer_side(self.scan_body)
@@ -594,11 +552,11 @@ class NavigationController:
             return C.ESCAPE_DRIVE_V, side * C.ESCAPE_STEER_W * 0.3
         return 0.0, side * C.ESCAPE_STEER_W
 
-    def _last_plan_t(self):
+    def _last_plan_t(self) -> float:
         """Simulation time of the most recent successful plan (or ``-inf``)."""
         return getattr(self, "_plan_stamp", -1e9)
 
-    def _go(self, target, next_state, t, reached_cb):
+    def _go(self, target: str, next_state: str, t: float, reached_cb: Callable[[float], None]) -> Tuple[float, float]:
         """Drive to a known pillar; on arrival fire the callback and advance the FSM."""
         pw = self.perception.pillar_world.get(target) if self.perception else None
         if pw is None:
@@ -637,7 +595,7 @@ class NavigationController:
         v, w, near = self.drive_along_path(self.path, v_cap=C.V_CRUISE)
         return v, w
 
-    def _on_blue_reached(self, t):
+    def _on_blue_reached(self, t: float) -> None:
         """Record the BLUE-pillar arrival time and emit a milestone event."""
         self.t_blue = t
         self.log.info("BLUE pillar reached at t=%.2fs (start->blue = %.2fs)",
@@ -646,7 +604,7 @@ class NavigationController:
                           state=self.state, pillar="blue",
                           split_s=round(t - self.t_start, 2))
 
-    def _on_yellow_reached(self, t):
+    def _on_yellow_reached(self, t: float) -> None:
         """Record the YELLOW-pillar arrival time and emit a milestone event."""
         self.t_yellow = t
         self.log.info("YELLOW pillar reached at t=%.2fs (blue->yellow = %.2fs)",
@@ -655,7 +613,7 @@ class NavigationController:
                           state=self.state, pillar="yellow",
                           split_s=round(t - self.t_blue, 2))
 
-    def step_mission(self, t):
+    def step_mission(self, t: float) -> Tuple[float, float]:
         """Advance the mission FSM by one tick and return the ``(v, w)`` command."""
         st = self.state
         if st == MissionState.INIT_SCAN:
@@ -688,7 +646,7 @@ class NavigationController:
     # ===================================================================== #
     #  Visualisation / output
     # ===================================================================== #
-    def _visualize(self, t, force=False):
+    def _visualize(self, t: float, force: bool = False) -> None:
         """Render the live map/costmap/path overlay and periodically snapshot it."""
         snap = force or (t - self._last_snapshot_t) >= C.SNAPSHOT_PERIOD_S
         # render live at ~10 Hz (every 3rd tick); always render when snapping
@@ -703,7 +661,7 @@ class NavigationController:
             self.visualizer.save(img, os.path.join(self.outdir, "live_map.png"))
             self._last_snapshot_t = t
 
-    def _log_timing(self):
+    def _log_timing(self) -> None:
         """Print the start->blue->yellow timing table and log it as an event."""
         start_to_blue = (self.t_blue - self.t_start) if self.t_blue is not None else None
         blue_to_yellow = (self.t_yellow - self.t_blue
@@ -720,7 +678,7 @@ class NavigationController:
                           blue_to_yellow_s=round(blue_to_yellow, 2) if blue_to_yellow is not None else None,
                           total_s=round(total, 2) if total is not None else None)
 
-    def finalize(self):
+    def finalize(self) -> None:
         """Stop the robot and write the final map, timing table, and telemetry."""
         self.hardware.stop()
         self.hardware.step()
@@ -745,7 +703,7 @@ class NavigationController:
     # ===================================================================== #
     #  Main loop
     # ===================================================================== #
-    def run(self):
+    def run(self) -> None:
         """Run the full sense-plan-act loop until the mission ends or 'Q' is hit.
 
         Each pipeline stage is isolated by :func:`guarded_stage`: an unexpected
@@ -791,13 +749,8 @@ class NavigationController:
                     self._update_depth_aux()
                 new_aux_hits = int(self.occupancy_grid.aux.sum())
                 if new_aux_hits > prev_aux_hits and self.path:
-                    # A floating wall just confirmed (crossed AUX_MIN_HITS)
-                    # while we're committed to a path -- force an immediate A*
-                    # replan through the now-updated, wider-margin costmap
-                    # instead of waiting out REPLAN_PERIOD_S. Without this the
-                    # planner only reacts to a newly-detected floating wall
-                    # once DWA/recovery notices it live, by which point the
-                    # robot may already be grazing it.
+                    # Force an immediate A* replan when a new obstacle exceeds the 
+                    # confidence threshold to ensure the local planner reacts promptly.
                     self._last_costmap_t = -1e9
                     self._plan_stamp = -1e9
                     self.events.event("aux_confirmed_replan", sim_time=t,
@@ -815,9 +768,7 @@ class NavigationController:
             with guarded_stage("mission", self.log, self.events, **ctx):
                 v, w = self.step_mission(t)
 
-            # position watchdog applies in every driving state, REGARDLESS of
-            # what is currently commanded (see _is_stuck docstring) -- this is
-            # what catches the no-reachable-frontier rescan spin (v=0, w!=0).
+            # Apply position and heading watchdogs globally across active driving states.
             driving = self.state in (MissionState.EXPLORE_BLUE, MissionState.GO_BLUE,
                                      MissionState.EXPLORE_YELLOW, MissionState.GO_YELLOW)
             if driving and (self._is_stuck(t) or self._is_frozen(t)):
@@ -844,7 +795,7 @@ class NavigationController:
 
         self.finalize()
 
-    def _log_status(self, t):
+    def _log_status(self, t: float) -> None:
         """Emit a periodic one-line status summary (console + a JSONL heartbeat)."""
         occ = int(self.occupancy_grid.occupied_mask().sum())
         pois = int(self.occupancy_grid.poison.sum())
@@ -865,7 +816,7 @@ class NavigationController:
                           ir_block=self.ir_block)
 
 
-def main():
+def main() -> None:
     """Construct and run the controller, guaranteeing the robot is stopped.
 
     Any exception that escapes the per-stage fault barriers is logged with a

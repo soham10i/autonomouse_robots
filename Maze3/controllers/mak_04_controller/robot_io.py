@@ -12,7 +12,11 @@ close-range backstop for the low floating wall panels the 2-D lidar misses
 """
 from __future__ import annotations
 
+import logging
+from typing import Any, Dict, List, Optional, Set, Tuple
+
 import numpy as np
+import numpy.typing as npt
 
 from controller import Robot, Keyboard  # type: ignore
 
@@ -22,7 +26,7 @@ from geometry import cmd_to_wheels
 from observability import get_logger
 
 
-def _first_device(robot, names):
+def _first_device(robot: Robot, names: List[str]) -> Tuple[Optional[Any], Optional[str]]:
     """Return ``(device, name)`` for the first present name, else ``(None, None)``."""
     for n in names:
         d = robot.getDevice(n)
@@ -106,7 +110,7 @@ class RobotInterface:
         self._log_inventory()
 
     # ------------------------------------------------------------- logging
-    def device_inventory(self):
+    def device_inventory(self) -> Dict[str, Any]:
         """Return a serialisable summary of which devices were discovered."""
         present = lambda d: d is not None
         return {
@@ -120,7 +124,7 @@ class RobotInterface:
             "ir_sensors": [n for n, _ in self.ir_sensors],
         }
 
-    def _log_inventory(self):
+    def _log_inventory(self) -> None:
         """Log the discovered-device inventory at startup for fault tracing."""
         ok = lambda d: "OK" if d is not None else "MISSING"
         self.log.info("timestep = %d ms", self.timestep)
@@ -131,21 +135,25 @@ class RobotInterface:
                       ok(self.imu), self.imu_name, [n for n, _ in self.ir_sensors])
 
     # ---------------------------------------------------------------- step
-    def step(self):
+    def step(self) -> int:
         """Advance the simulation one basic timestep; returns -1 when Webots exits."""
-        return self.robot.step(self.timestep)
+        return int(self.robot.step(self.timestep))
 
-    def time(self):
+    def time(self) -> float:
         """Current simulation time in seconds."""
-        return self.robot.getTime()
+        return float(self.robot.getTime())
 
     # -------------------------------------------------------------- motors
-    def set_cmd(self, v, w):
+    def set_cmd(self, v: float, w: float) -> None:
         """Command body velocity ``(v, w)`` by driving the wheel motors.
 
         Maps ``(v, w)`` to left/right wheel angular velocities, clamps them to
         the drive limit, and applies them. A motor-write failure is logged but
         never propagated, so one bad actuation cannot crash the control loop.
+
+        Args:
+            v: Forward linear velocity (metres/second).
+            w: Rotational velocity (radians/second).
         """
         self._cmd_v, self._cmd_w = v, w
         wl, wr = cmd_to_wheels(v, w)
@@ -161,12 +169,12 @@ class RobotInterface:
         except Exception as exc:  # noqa: BLE001 - actuation write barrier
             self.log.error("motor command failed (v=%.2f w=%.2f): %s", v, w, exc)
 
-    def stop(self):
+    def stop(self) -> None:
         """Command zero velocity (halt the robot)."""
         self.set_cmd(0.0, 0.0)
 
     # ------------------------------------------------------------- sensors
-    def read_encoders(self):
+    def read_encoders(self) -> Tuple[Optional[float], Optional[float]]:
         """Return ``(left_rad, right_rad)`` averaged front/rear, or ``(None, None)``.
 
         Returns ``(None, None)`` if any encoder is absent or a read raises, so
@@ -181,17 +189,17 @@ class RobotInterface:
             return None, None
         return 0.5 * (fl + rl), 0.5 * (fr + rr)
 
-    def read_yaw(self):
+    def read_yaw(self) -> Optional[float]:
         """Return the IMU yaw in radians, or ``None`` if unavailable/faulted."""
         if self.imu is None:
             return None
         try:
-            return self.imu.getRollPitchYaw()[2]
+            return float(self.imu.getRollPitchYaw()[2])
         except Exception as exc:  # noqa: BLE001 - device read barrier
             self.log.warning("imu read failed: %s", exc)
             return None
 
-    def read_lidar_ranges(self):
+    def read_lidar_ranges(self) -> Optional[npt.NDArray[np.float32]]:
         """Return the raw lidar range image as a float32 array, or ``None``."""
         if self.lidar is None:
             return None
@@ -201,14 +209,14 @@ class RobotInterface:
             self.log.warning("lidar read failed: %s", exc)
             return None
 
-    def lidar_specs(self):
+    def lidar_specs(self) -> Optional[Tuple[int, float, float, float]]:
         """Return ``(n_beams, fov, min_range, max_range)`` or ``None`` if no lidar."""
         if self.lidar is None:
             return None
-        return (self.lidar.getHorizontalResolution(), self.lidar.getFov(),
-                self.lidar.getMinRange(), self.lidar.getMaxRange())
+        return (int(self.lidar.getHorizontalResolution()), float(self.lidar.getFov()),
+                float(self.lidar.getMinRange()), float(self.lidar.getMaxRange()))
 
-    def read_rgb_bgr(self):
+    def read_rgb_bgr(self) -> Optional[npt.NDArray[np.uint8]]:
         """Return the RGB camera frame as an ``(H, W, 3)`` BGR uint8 array, or ``None``."""
         if self.camera is None:
             return None
@@ -223,7 +231,7 @@ class RobotInterface:
             self.log.warning("rgb camera read failed: %s", exc)
             return None
 
-    def read_depth(self):
+    def read_depth(self) -> Optional[npt.NDArray[np.float32]]:
         """Return the depth range image as an ``(H, W)`` float32 array, or ``None``."""
         if self.depth is None:
             return None
@@ -237,13 +245,13 @@ class RobotInterface:
             self.log.warning("depth camera read failed: %s", exc)
             return None
 
-    def camera_specs(self):
+    def camera_specs(self) -> Optional[Tuple[int, int, float]]:
         """Return ``(width, height, fov)`` of the RGB camera, or ``None``."""
         if self.camera is None:
             return None
-        return (self.camera.getWidth(), self.camera.getHeight(), self.camera.getFov())
+        return (int(self.camera.getWidth()), int(self.camera.getHeight()), float(self.camera.getFov()))
 
-    def depth_specs(self):
+    def depth_specs(self) -> Optional[Tuple[int, int, float, float, float]]:
         """Return ``(width, height, fov, min_range, max_range)`` of depth, or ``None``."""
         if self.depth is None:
             return None
@@ -251,10 +259,10 @@ class RobotInterface:
             dmin, dmax = float(self.depth.getMinRange()), float(self.depth.getMaxRange())
         except Exception:
             dmin, dmax = 0.05, 10.0
-        return (self.depth.getWidth(), self.depth.getHeight(), self.depth.getFov(), dmin, dmax)
+        return (int(self.depth.getWidth()), int(self.depth.getHeight()), float(self.depth.getFov()), dmin, dmax)
 
     # --------------------------------------------------------- IR proximity
-    def _build_ir_lookup(self, sensor):
+    def _build_ir_lookup(self, sensor: Any) -> Optional[ir_lookup.LookupData]:
         """Pre-compute a value->metres mapping from the proto's lookupTable.
 
         Pure inversion math lives in :mod:`ir_lookup` (Webots-free, unit
@@ -270,7 +278,7 @@ class RobotInterface:
             fallback = 4.0
         return ir_lookup.build_lookup(tbl, fallback)
 
-    def read_ir_m(self):
+    def read_ir_m(self) -> Dict[str, float]:
         """Return ``{sensor_name: distance_in_metres}`` for all chassis IRs."""
         out = {}
         for n, dev in self.ir_sensors:
@@ -283,7 +291,7 @@ class RobotInterface:
             out[n] = ir_lookup.value_to_meters(info, raw) if info else float("nan")
         return out
 
-    def poll_key(self):
+    def poll_key(self) -> Set[int]:
         """Drain and return the set of keyboard key codes pressed this tick."""
         keys = set()
         while True:

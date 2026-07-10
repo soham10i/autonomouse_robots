@@ -21,6 +21,7 @@ from __future__ import annotations
 import math
 import os
 import sys
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -34,13 +35,21 @@ from geometry import inverse_transform_points
 # --------------------------------------------------------------------------- #
 #  Synthetic corridor world (walls as dense point clouds)
 # --------------------------------------------------------------------------- #
-def corridor_walls(centerline, half_width, spacing=0.02):
+def corridor_walls(centerline: List[Tuple[float, float]], half_width: float, spacing: float = 0.02) -> np.ndarray:
     """World wall points (N,2) for a corridor of ``half_width`` around a polyline.
 
     For each densely-sampled point on the centreline, drop one wall point on
     each side along the local normal.  This approximates the two corridor walls
     (including an L-bend) the way a real lidar would see them, minus occlusion
     -- which is irrelevant for the local planner's nearest-point clearance test.
+
+    Args:
+        centerline (List[Tuple[float, float]]): The path polyline coordinates.
+        half_width (float): The lateral distance from the centerline to the walls.
+        spacing (float, optional): Distance between sampled wall points. Defaults to 0.02.
+
+    Returns:
+        np.ndarray: An (N, 2) array of wall coordinates.
     """
     pts = []
     cl = np.asarray(centerline, dtype=float)
@@ -59,8 +68,16 @@ def corridor_walls(centerline, half_width, spacing=0.02):
     return np.asarray(pts, dtype=float)
 
 
-def polyline_points(polyline, spacing=0.02):
-    """Dense (N,2) points sampled along an explicit wall polyline."""
+def polyline_points(polyline: List[Tuple[float, float]], spacing: float = 0.02) -> np.ndarray:
+    """Dense (N,2) points sampled along an explicit wall polyline.
+
+    Args:
+        polyline (List[Tuple[float, float]]): The vertices of the polyline.
+        spacing (float, optional): Distance between sampled points. Defaults to 0.02.
+
+    Returns:
+        np.ndarray: An (N, 2) array of coordinates densely sampled along the polyline.
+    """
     pts = []
     pl = np.asarray(polyline, dtype=float)
     for a, b in zip(pl[:-1], pl[1:]):
@@ -72,12 +89,21 @@ def polyline_points(polyline, spacing=0.02):
     return np.asarray(pts, dtype=float)
 
 
-def l_corridor(corner, leg_in, leg_out, half_width):
+def l_corridor(corner: Tuple[float, float], leg_in: float, leg_out: float, half_width: float) -> np.ndarray:
     """Walls (N,2) for a clean left-turning L-corridor of full width 2*half_width.
 
     Built as two MITERED wall polylines (inner + outer) so the convex inner
     corner is a single point, not the self-intersecting notch a per-segment
     normal offset produces.  Travels +x into ``corner`` then +y out of it.
+
+    Args:
+        corner (Tuple[float, float]): The internal turning point coordinates (x, y).
+        leg_in (float): The length of the inbound leg leading into the corner.
+        leg_out (float): The length of the outbound leg leaving the corner.
+        half_width (float): The lateral distance from the centerline to the walls.
+
+    Returns:
+        np.ndarray: An (N, 2) array of wall coordinates representing the corridor boundaries.
     """
     cx, cy = corner
     hw = half_width
@@ -89,8 +115,17 @@ def l_corridor(corner, leg_in, leg_out, half_width):
 # --------------------------------------------------------------------------- #
 #  Geometry helper
 # --------------------------------------------------------------------------- #
-def dist_to_polyline(px, py, poly):
-    """Perpendicular distance from (px,py) to a polyline (the path centreline)."""
+def dist_to_polyline(px: float, py: float, poly: List[Tuple[float, float]]) -> float:
+    """Perpendicular distance from (px,py) to a polyline (the path centreline).
+
+    Args:
+        px (float): Target point x-coordinate.
+        py (float): Target point y-coordinate.
+        poly (List[Tuple[float, float]]): The polyline vertices.
+
+    Returns:
+        float: Minimum distance from the point to the nearest line segment on the polyline.
+    """
     best = float("inf")
     for a, b in zip(poly[:-1], poly[1:]):
         ax, ay = a
@@ -106,8 +141,24 @@ def dist_to_polyline(px, py, poly):
 # --------------------------------------------------------------------------- #
 #  One closed-loop episode
 # --------------------------------------------------------------------------- #
-def simulate(name, start_pose, path_world, walls, *, max_ticks=900,
-             goal_tol=0.22, v_cap=None):
+def simulate(name: str, start_pose: Tuple[float, float, float], path_world: List[Tuple[float, float]],
+             walls: np.ndarray, *, max_ticks: int = 900, goal_tol: float = 0.22,
+             v_cap: Optional[float] = None) -> Dict[str, Any]:
+    """Runs a single scenario simulation of the DWA local planner.
+
+    Args:
+        name (str): Identifier for the scenario.
+        start_pose (Tuple[float, float, float]): Initial pose ``(x, y, theta)``.
+        path_world (List[Tuple[float, float]]): The target path to follow.
+        walls (np.ndarray): The synthetic point-cloud walls of the corridor.
+        max_ticks (int, optional): The maximum number of control ticks to simulate. Defaults to 900.
+        goal_tol (float, optional): Distance tolerance to consider the goal reached. Defaults to 0.22.
+        v_cap (Optional[float], optional): Maximum velocity limit. Defaults to None.
+
+    Returns:
+        Dict[str, Any]: Performance metrics from the simulation including completion status, distance,
+        average speed, and clearance to walls.
+    """
     dt = 0.032
     dwa = LP.DWAPlanner(ctrl_dt=dt)
     x, y, th = start_pose
@@ -162,18 +213,28 @@ def simulate(name, start_pose, path_world, walls, *, max_ticks=900,
 # --------------------------------------------------------------------------- #
 #  Scenarios + assertions
 # --------------------------------------------------------------------------- #
-def _report(r):
+def _report(r: Dict[str, Any]) -> None:
+    """Print a summary of the simulated episode's results.
+
+    Args:
+        r (Dict[str, Any]): The simulation metrics returned by `simulate`.
+    """
     print(f"  [{r['name']}] reached={r['reached']} "
           f"dist={r['dist']:.2f}m avg_v={r['avg_speed']:.3f}m/s "
           f"min_clear={r['min_clear']:.3f}m max_dev={r['max_dev']:.3f}m "
           f"t={r['elapsed']:.1f}s goal_err={r['final_dist_to_goal']:.2f}m")
 
 
-def main():
-    print("mak_02 Maze4 closed-loop dry-run (carrot + DWA)")
-    fails = []
+def main() -> None:
+    """Run all dry-run scenarios and validate assertions.
 
-    def check(name, cond):
+    Exits with code 1 if any scenarios fail to meet requirements.
+    """
+    print("mak_02 Maze4 closed-loop dry-run (carrot + DWA)")
+    fails: List[str] = []
+
+    def check(name: str, cond: bool) -> None:
+        """Evaluate a boolean condition and append to failures if False."""
         print(f"    [{'PASS' if cond else 'FAIL'}] {name}")
         if not cond:
             fails.append(name)

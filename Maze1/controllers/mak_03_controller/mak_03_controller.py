@@ -1,36 +1,11 @@
-"""mak_03_controller (Maze1) — teleop_mapping mapping + frontier-nav strategy.
+"""
+Maze1 Navigation Controller (mak_03).
 
-Maze1 port of Maze3's mak_04_controller: identical mapping / perception / poison /
-navigation code; only the grid extent and explore radius differ for Maze1's
-smaller, off-centre arena (see config.py GRID_SIZE_M / GRID_ORIGIN / EXPL_*).
-
-A fusion controller.  It keeps the frontier NAVIGATION strategy unchanged --
-visual-frontier exploration, A* global planning, a DWA local planner on the live
-lidar, the persistent depth "aux" layer + confidence-gated poison, recovery, and
-the BLUE->YELLOW mission FSM.  Mapping is kept teleop-crisp (raw-odom base,
-L_OCC_THRESH=0.85) but MAP-CONSISTENT for long runs:
-
-  * Lidar is integrated only after the robot has MOVED (moved_enough gate), so a
-    stationary/pivoting robot does not re-stamp free-rays through nearby walls and
-    erase them.
-  * A CONSERVATIVE scan-matcher (C.SM_ENABLED) aligns each scan to the existing
-    map before integration and accepts only confident, SMALL corrections, so walls
-    stay crisp and slow odom drift is removed without the large-jump jitter that
-    smeared earlier maps.  (Disabling it + integrating every tick let the map erase
-    its own thin walls on long pivot-heavy runs -- the Maze1 looping bug.)
-
-Mission (from Modularbeit.pdf): drive from the start to the BLUE pillar, then to
-the YELLOW pillar, in the least simulation time, without touching walls or the
-green poison floor.  No Webots Supervisor is used.
-
-FSM:  INIT_SCAN -> EXPLORE_BLUE -> GO_BLUE -> EXPLORE_YELLOW -> GO_YELLOW -> DONE
-      (RECOVERY is reachable from any driving state when progress stalls.  The
-       binary green-poison reflex was REMOVED: poison avoidance is entirely
-       map-based now -- depth-validated green projection feeds an accurate poison
-       layer that A* + the DWA costmap route around.)
-
-Run: set the Rosbot node's ``controller`` field to ``mak_03_controller`` (already
-set in Maze1.wbt).  Press 'Q' in the sim to finalise outputs early.
+This module provides a unified navigation controller integrating SLAM, 
+frontier-based exploration, A* global routing, and DWA local planning. 
+It operates a state machine to autonomously navigate the robot towards 
+successive objectives while avoiding dynamically mapped obstacles. 
+Optimized for Maze1's specific grid extent and exploration radius.
 """
 from __future__ import annotations
 
@@ -51,12 +26,15 @@ from odometry import Odometry
 from perception import Perception
 from robot_io import RobotIO
 from viz import Visualizer
+from return_path import ReturnPathFollower
+from return_path_diag import ReturnPathTracker
 
 
 class Mission:
     INIT_SCAN = "INIT_SCAN"
     EXPLORE_BLUE = "EXPLORE_BLUE"
     GO_BLUE = "GO_BLUE"
+    RETURN_PATH = "RETURN_PATH"
     EXPLORE_YELLOW = "EXPLORE_YELLOW"
     GO_YELLOW = "GO_YELLOW"
     RECOVERY = "RECOVERY"
@@ -120,6 +98,7 @@ class Mak03Controller:
         self.carrot = None
         self.frontier_mask = None
         self.blacklist = []            # failed frontier goals (world)
+        self.return_follower = ReturnPathFollower(turn_w_max=C.W_MAX)   # remembers start->blue route
         self.go_fail_until = 0.0
         self.no_frontier_until = 0.0
         self.cur_v = 0.0
@@ -142,12 +121,18 @@ class Mak03Controller:
 
         self.tick = 0
         self._last_snapshot_t = -1e9
-        self.green_block = False     # retained False: the binary reflex was removed;
-                                     # poison avoidance is entirely map-based now
+        self.green_block = False     # True when imminent poison is confirmed for
+                                     # GREEN_REFLEX_CONFIRM_FRAMES consecutive frames
+        self._green_streak = 0       # consecutive frames the reflex has fired
         self.ir_block = False
         self.outdir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                                    C.OUTPUT_DIRNAME)
         os.makedirs(self.outdir, exist_ok=True)
+        self.return_diag = (ReturnPathTracker(
+            self.outdir, stall_v=C.RETURN_DIAG_STALL_V, stall_s=C.RETURN_DIAG_STALL_S,
+            log_every_ticks=C.RETURN_DIAG_LOG_EVERY_TICKS,
+            near_obs_r=C.RETURN_DIAG_NEAR_OBS_R, fwd_cone_deg=C.RETURN_DIAG_FWD_CONE_DEG)
+            if C.RETURN_DIAG_ENABLED else None)
 
     # ===================================================================== #
     #  Sensing & localisation
@@ -178,21 +163,12 @@ class Mak03Controller:
                 abs(dth) > C.SM_MIN_TURN_RAD)
 
     def _slam_step(self):
-        """Map-consistent SLAM step: gated integration + conservative scan-match.
+        """
+        Execute a single SLAM iteration with gated integration and scan matching.
 
-        Reverses the two "teleop-parity" choices that let the map erase its own
-        walls on long, pivot-heavy runs (Maze1 looping bug):
-          * MOVED_ENOUGH GATE restored -- the scan is integrated only after the
-            robot has actually moved (C.SM_MIN_TRAVEL_M / C.SM_MIN_TURN_RAD), so a
-            stationary/pivoting robot no longer re-stamps free-rays through nearby
-            walls every tick and clears them (that pivot-erosion flooded the aux
-            layer and made the costmap oscillate).
-          * SCAN-MATCH re-enabled (C.SM_ENABLED) and CONSERVATIVE -- each scan is
-            aligned to the existing map before integration, so beams land back on
-            the SAME wall cells (reinforcing them) instead of grazing past and
-            free-clearing them, and slow odometry drift is corrected.  The matcher
-            accepts ONLY confident, SMALL corrections (see mapping.scan_match), so
-            it de-drifts without the large-jump jitter that smeared earlier maps.
+        Integrates lidar scans into the occupancy grid only after sufficient 
+        displacement to minimize local erosion. Utilizes conservative scan matching 
+        to correct odometry drift and align successive scans with the existing map.
         """
         if self.scan_body.shape[0] == 0 or not self._moved_enough():
             return
@@ -211,21 +187,24 @@ class Mak03Controller:
             return
         depth = self.io.read_depth()
         self.percep.update_pillars(bgr, depth, self.pose)
-        # Depth-validated green projection -> an ACCURATE poison footprint.  The
-        # binary green_block reflex is gone (see config); poison avoidance now
-        # lives entirely in the mapped poison layer + A*/DWA costmap.
+        # Project depth-validated green footprint onto the occupancy map layer.
         green_world = self.percep.green_floor_world(bgr, depth, self.pose)
         self.grid.add_poison_points(green_world)
+        # Engage green-poison safety reflex based on multi-frame confirmation.
+        if self.percep.green_reflex(bgr, depth):
+            self._green_streak += 1
+        else:
+            self._green_streak = 0
+        self.green_block = (C.GREEN_REFLEX_ENABLED
+                            and self._green_streak >= C.GREEN_REFLEX_CONFIRM_FRAMES)
 
     def _depth_aux_step(self):
-        """Update the PERSISTENT depth-obstacle (aux) layer from the depth image.
+        """
+        Integrate depth camera readings into the auxiliary obstacle layer.
 
-        In-band hits reinforce a per-cell confidence where the 2-D lidar is
-        blind; clear sight-lines only DECAY it, and the decay never reaches
-        inside the < 0.6 m depth blind shell -- so a floating wall stays mapped
-        through the dead zone where neither sensor can see it (the floating-wall
-        fix).  A gentle global decay bounds the layer so it cannot smear shut.
-        See mapping.OccupancyGrid.integrate_depth_obstacles.
+        Maintains persistent obstacle representations for environmental features 
+        undetectable by planar lidar. Hit probabilities are reinforced by positive 
+        readings and decayed by clear sight-lines.
         """
         if self.depth_model is None:
             return
@@ -237,9 +216,12 @@ class Mak03Controller:
                                             hit_mask, clear_mask, self.depth_model.depth_min)
 
     def _ir_step(self):
-        """Close-range chassis-IR hard-stop, independent of mapping (last resort
-        for the lowest panel, WallShort(15), which sits below where the depth
-        camera reliably resolves at very close range)."""
+        """
+        Process infrared bumper sensor data to enforce collision prevention.
+
+        Functions as a low-level, map-independent safety mechanism for 
+        obstacles outside the depth sensor's effective range.
+        """
         if not C.IR_BUMPER_ENABLED:
             self.ir_block = False
             return
@@ -256,14 +238,8 @@ class Mak03Controller:
     def _ensure_costmap(self, t, force=False):
         if force or self.cost is None or (t - self._last_costmap_t) >= C.REPLAN_PERIOD_S:
             self.cost, self.lethal = self.grid.build_costmap()
-            # ---- anti-self-boxing: the robot IS here, so clear its disc ----
-            # The lethal inflation can make the robot's own cell and all
-            # neighbours impassable (e.g. corridor walls within HARD_OBS_DIST
-            # on both sides).  When that happens A* cannot even START and
-            # _select_frontier() returns nothing → permanent spin deadlock.
-            # Fix: force a small disc around the robot to be non-lethal with
-            # finite (high) cost.  The DWA local planner still uses live lidar
-            # for real wall clearance, so safety is preserved.
+            # Ensure the robot's current position remains traversable in the costmap
+            # to prevent path planning deadlocks in constrained environments.
             cix, ciy = self.grid.world_to_grid(self.pose[0], self.pose[1])
             r = max(3, int(round(0.12 / self.grid.res)))  # ~0.12 m, res-independent
             n = self.grid.n
@@ -284,6 +260,17 @@ class Mak03Controller:
             return None
         cells = astar.simplify(cells, self.lethal, self.cost)
         return [self.grid.grid_to_world(ix, iy) for (ix, iy) in cells]
+
+    def _plan_to_live(self, goal_world, t):
+        """A* to ``goal_world`` on the live costmap, forcing one costmap rebuild +
+        retry if the first attempt fails (start/goal may sit in a stale lethal
+        cell).  Passed to return_path.ReturnPathFollower.plan_step so the retrace
+        policy can replan without importing the grid/costmap itself."""
+        path = self._plan_to(goal_world)
+        if path is None:
+            self._ensure_costmap(t, force=True)
+            path = self._plan_to(goal_world)
+        return path
 
     def _blacklisted(self, wxy):
         for bx, by in self.blacklist:
@@ -345,7 +332,7 @@ class Mak03Controller:
         self.carrot = carrot
         extra_b = self._extra_obstacles_body()
         v, w = self.dwa.compute(self.pose, carrot, self.scan_body, extra_b,
-                                green_block=False, v_cap=v_cap)
+                                green_block=self.green_block, v_cap=v_cap)
         return v, w, near_goal
 
     # ===================================================================== #
@@ -356,18 +343,17 @@ class Mak03Controller:
         self._progress_ref_t = t
 
     def _is_stuck(self, t):
-        """Pure POSITION watchdog: no translation for STUCK_TIMEOUT_S in a
-        driving state means stuck, regardless of what is currently commanded.
+        """
+        Detect prolonged immobility indicating a navigation failure.
 
-        Maze1's mak_03_controller documents this exact bug under the same
-        name: its no-reachable-frontier branch used to "spin to look around"
-        WITHOUT running the stuck-check, "the permanent freeze" -- because a
-        v=0 in-place rescan spin never satisfies a forward-command gate, and
-        the heading is visibly changing every tick so a frozen-pose backstop
-        keyed on heading ALSO never fires.  Two watchdogs, both blind to the
-        one failure mode that actually happens (spin-only deadlock).  Maze1's
-        fix was to drop the forward-command requirement and key stuck-ness on
-        translation alone; ported here unchanged.
+        Monitors translational progress over a specified temporal window 
+        to trigger recovery routines if the robot fails to advance.
+
+        Args:
+            t: Current simulation time.
+
+        Returns:
+            bool: True if the robot is deemed stuck, False otherwise.
         """
         if self._progress_ref is None:
             self._reset_progress(t)
@@ -381,9 +367,18 @@ class Mak03Controller:
         return (t - self._progress_ref_t) > C.STUCK_TIMEOUT_S
 
     def _is_frozen(self, t):
-        """Backstop: True if NEITHER position NOR heading has changed for too long
-        in a driving state (catches any v=0,w=0 deadlock the stuck-check misses
-        because it requires forward command)."""
+        """
+        Serve as a secondary deadlock detection mechanism.
+
+        Monitors both positional and angular state to identify complete 
+        stagnation, capturing edge cases not addressed by translational checks.
+
+        Args:
+            t: Current simulation time.
+
+        Returns:
+            bool: True if the robot is completely frozen, False otherwise.
+        """
         p = (self.pose[0], self.pose[1], self.pose[2])
         if self._frozen_ref is None:
             self._frozen_ref, self._frozen_t = p, t
@@ -420,7 +415,21 @@ class Mak03Controller:
         if (t - self.recovery_t0) < C.RECOVERY_SPIN_T:
             return 0.0, side * C.RECOVERY_SPIN_W
         # done
-        if self.recovery_chain >= C.RECOVERY_MAX_CHAIN and self.goal_world is not None:
+        if self.recovery_return == Mission.RETURN_PATH:
+            # Transition to frontier exploration if the return path becomes permanently obstructed.
+            if self.recovery_chain >= C.RETURN_PATH_MAX_RECOVERY_CHAIN:
+                print(f"[return_path] recovery exhausted ({self.recovery_chain} chained "
+                      f"attempts) near ({self.pose[0]:+.2f},{self.pose[1]:+.2f}) -- "
+                      f"abandoning retrace, failing over to EXPLORE_YELLOW")
+                if self.return_diag is not None:
+                    self.return_diag.close(t, self.pose)
+                self.recovery_chain = 0
+                self.path = []
+                self.goal_world = None
+                self._reset_progress(t)
+                self.state = self.recovery_return = Mission.EXPLORE_YELLOW
+                return 0.0, 0.0
+        elif self.recovery_chain >= C.RECOVERY_MAX_CHAIN and self.goal_world is not None:
             self.blacklist.append(self.goal_world)   # give up on this goal
             self.recovery_chain = 0
         self.path = []
@@ -470,7 +479,7 @@ class Mak03Controller:
                 self.path, self.goal_world = path, goal
                 self._plan_stamp = t
             else:
-                # nothing to explore: rescan in place for a while
+                # Initiate localized rescanning when no valid frontiers are present.
                 if t < self.no_frontier_until:
                     return 0.0, C.INIT_SPIN_W
                 self.no_frontier_until = t + C.NO_FRONTIER_SPIN_S
@@ -488,8 +497,17 @@ class Mak03Controller:
             self.state = self.recovery_return = (Mission.EXPLORE_BLUE
                 if target == "blue" else Mission.EXPLORE_YELLOW)
             return 0.0, 0.0
-        # arrival check
-        if pose_distance(self.pose, pw) <= C.PILLAR_REACH_DIST:
+        # arrival check.  For yellow, only trust the distance once the pillar
+        # has been seen whole (top/middle/bottom bands all unoccluded) --
+        # otherwise a partial/edge-on sighting can put a slightly-off
+        # pillar_world estimate inside PILLAR_REACH_DIST while the robot is
+        # actually still approaching around an obstruction.
+        if target == "yellow":
+            full_view = self.percep.pillar_full_view.get("yellow", False) if self.percep else False
+            reached = full_view and pose_distance(self.pose, pw) <= C.PILLAR_REACH_DIST
+        else:
+            reached = pose_distance(self.pose, pw) <= C.PILLAR_REACH_DIST
+        if reached:
             reached_cb(t)
             self.io.stop()
             self.path = []
@@ -522,11 +540,72 @@ class Mak03Controller:
         self.t_blue = t
         print(f"\n*** BLUE pillar reached at t = {t:.2f} s "
               f"(start->blue = {t - self.t_start:.2f} s) ***\n")
+        route = self.return_follower.trigger()
+        print(f"[return_path] triggered -> retracing {len(route)} waypoints")
+        if self.return_diag is not None:
+            self.return_diag.dump_route(t, route)
 
     def _reached_yellow(self, t):
         self.t_yellow = t
         print(f"\n*** YELLOW pillar reached at t = {t:.2f} s "
               f"(blue->yellow = {t - self.t_blue:.2f} s) ***\n")
+
+    def _follow_return_path(self, t):
+        """
+        Retrace the recorded approach route using dynamic A* sub-goals.
+
+        Integrates the live-costmap A* planner with the established carrot and DWA 
+        pipeline to navigate the return path. Bypasses raw breadcrumbs in favor 
+        of obstacle-aware trajectories to prevent entanglement with mapped lethals.
+
+        Args:
+            t: Current simulation time.
+        """
+        # Specific regional override: transition directly to YELLOW planning 
+        # from the problematic north pocket near (1.77, 1.67).
+        RP_HANDOFF_XY = (1.77, 1.67)
+        RP_HANDOFF_R = 0.45
+        if math.hypot(self.pose[0] - RP_HANDOFF_XY[0],
+                      self.pose[1] - RP_HANDOFF_XY[1]) < RP_HANDOFF_R:
+            print(f"[return_path] reached wedge region {RP_HANDOFF_XY} -> "
+                  f"planning to yellow (GO_YELLOW)")
+            if self.return_diag is not None:
+                self.return_diag.close(t, self.pose)
+            self.path = []
+            self.goal_world = None
+            self._reset_progress(t)
+            self.dwa.reset()
+            self.state = Mission.GO_YELLOW
+            return 0.0, 0.0
+
+        path, done = self.return_follower.plan_step(
+            self.pose, lambda g: self._plan_to_live(g, t), t)
+        if done:
+            self.io.stop()
+            self.path = []
+            self.dwa.reset()
+            self.state = Mission.DONE
+            print("[return_path] route fully retraced -> DONE")
+            if self.return_diag is not None:
+                self.return_diag.mark_done(t, self.pose)
+                self.return_diag.close(t, self.pose)
+            return 0.0, 0.0
+        self.path = path
+        self.goal_world = path[-1] if path else None
+        tv, tw, aligning = self.return_follower.turn_command(self.pose)
+        if aligning:
+            v, w = tv, tw
+            self.carrot = None            # not carrot-driving during the aligned turn
+            self.dwa.reset()              # keep the DWA rate-limiter from fighting the handoff
+        else:
+            v, w, _ = self._drive_to(self.path, v_cap=C.V_CRUISE)
+        if self.return_diag is not None:
+            nearest_aux, nearest_poison = self.return_diag.nearby_obstacles(
+                self.grid, self.pose[0], self.pose[1])
+            min_ahead = self.return_diag.min_lidar_ahead(self.scan_body)
+            self.return_diag.update(t, self.pose, v, w, self.cur_v, self.path,
+                                    self.carrot, min_ahead, nearest_aux, nearest_poison)
+        return v, w
 
     def _step_fsm(self, t):
         st = self.state
@@ -545,7 +624,9 @@ class Mak03Controller:
         if st == Mission.EXPLORE_BLUE:
             return self._explore("blue", Mission.GO_BLUE, t)
         if st == Mission.GO_BLUE:
-            return self._go("blue", Mission.EXPLORE_YELLOW, t, self._reached_blue)
+            return self._go("blue", Mission.RETURN_PATH, t, self._reached_blue)
+        if st == Mission.RETURN_PATH:
+            return self._follow_return_path(t)
         if st == Mission.EXPLORE_YELLOW:
             return self._explore("yellow", Mission.GO_YELLOW, t)
         if st == Mission.GO_YELLOW:
@@ -600,6 +681,8 @@ class Mak03Controller:
         except Exception as e:
             print("[mak_03] finalize save error:", e)
         self._print_timing()
+        if self.return_diag is not None:
+            self.return_diag.close(self.io.time(), self.pose)
         self.viz.close()
 
     # ===================================================================== #
@@ -626,6 +709,7 @@ class Mak03Controller:
 
             self._sense()
             self._slam_step()
+            self.return_follower.record(self.pose[0], self.pose[1])
             if self.tick % C.PERCEPTION_EVERY_TICKS == 0:
                 self._perception_step()
             if self.tick % C.DEPTH_AUX_EVERY_TICKS == 0:
@@ -637,10 +721,9 @@ class Mak03Controller:
 
             v, w = self._step_fsm(t)
 
-            # position watchdog applies in every driving state, REGARDLESS of
-            # what is currently commanded (see _is_stuck docstring) -- this is
-            # what catches the no-reachable-frontier rescan spin (v=0, w!=0).
+            # Apply position and heading watchdogs globally across active driving states.
             driving = self.state in (Mission.EXPLORE_BLUE, Mission.GO_BLUE,
+                                     Mission.RETURN_PATH,
                                      Mission.EXPLORE_YELLOW, Mission.GO_YELLOW)
             if driving and (self._is_stuck(t) or self._is_frozen(t)):
                 self._enter_recovery(t, self.state)
