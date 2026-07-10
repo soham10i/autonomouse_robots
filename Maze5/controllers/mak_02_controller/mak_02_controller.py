@@ -142,6 +142,8 @@ class NavigationController:
         self.recovery_t0 = 0.0
         self.recovery_return = MissionState.EXPLORE_BLUE
         self.recovery_chain = 0
+        self._creep_target = None
+        self._creep_t0 = 0.0
 
         # timing table
         self.t_start = None
@@ -369,13 +371,29 @@ class NavigationController:
         if (t - self.recovery_t0) < C.RECOVERY_SPIN_T:
             return 0.0, side * C.RECOVERY_SPIN_W
         # done
-        if self.recovery_chain >= C.RECOVERY_MAX_CHAIN and self.goal_world is not None:
-            self.blacklist.append(self.goal_world)   # give up on this goal
+        return_state = self.recovery_return
+        if self.recovery_chain >= C.RECOVERY_MAX_CHAIN:
+            if self.goal_world is not None:
+                self.blacklist.append(self.goal_world)   # give up on this goal
             self.recovery_chain = 0
+            # GO_BLUE/GO_YELLOW's goal is a straight-line pillar standoff point,
+            # not blacklist-aware -- bouncing straight back into the same GO_*
+            # state re-derives the SAME (unreachable) standoff and loops forever
+            # (this is the "GO/RECOVERY bounce" documented for the sibling maze4
+            # controller). After repeated failed recoveries, fall back to
+            # frontier EXPLORE instead so a different approach angle gets tried,
+            # with a cooldown so _try_go_to_target doesn't immediately re-commit.
+            if return_state in (MissionState.GO_BLUE, MissionState.GO_YELLOW):
+                return_state = (MissionState.EXPLORE_BLUE
+                                 if return_state == MissionState.GO_BLUE
+                                 else MissionState.EXPLORE_YELLOW)
+                self.go_fail_until = t + C.GO_FAIL_COOLDOWN_S
+                self.log.warning("recovery exhausted in %s; falling back to %s",
+                                 self.recovery_return, return_state)
         self.path = []
         self.goal_world = None
         self._reset_progress(t)
-        self.state = self.recovery_return
+        self.state = return_state
         return 0.0, 0.0
 
     # ===================================================================== #
@@ -440,15 +458,64 @@ class NavigationController:
             self.state = self.recovery_return = (MissionState.EXPLORE_BLUE
                 if target == "blue" else MissionState.EXPLORE_YELLOW)
             return 0.0, 0.0
-        # arrival check
+
+        # ------------------------------------------------------------- #
+        # Arrival check -- SIMPLE and ground-truth, on purpose.
+        #
+        # pillar_world[target] is a running average of camera/depth pillar
+        # detections; up close the colour blob can clip the camera frame and
+        # bias that average, so pose_distance(pose, pw) can stay stuck above
+        # PILLAR_REACH_DIST forever even though the robot is touching the
+        # pillar (this was the root cause of the GO<->RECOVERY loop). Rather
+        # than trying to fully de-bias perception, just trust the live lidar
+        # for the arrival decision: once committed to this target, the only
+        # thing that close ahead of the robot IS the pillar. So "reached" is
+        # simply: the tracked position estimate says we're close, OR the
+        # live lidar dead ahead already reads within PILLAR_TOUCH_DIST.
+        # ------------------------------------------------------------- #
         reach_dist = C.PILLAR_REACH_DIST_BLUE if target == "blue" else C.PILLAR_REACH_DIST_YELLOW
-        if pose_distance(self.pose, pw) <= reach_dist:
+        front = LP.front_clearance(self.scan_body, half_width=0.15)
+        dist_to_pw = pose_distance(self.pose, pw)
+        if dist_to_pw <= reach_dist or front < C.PILLAR_TOUCH_DIST:
+            self._creep_target = None
             reached_cb(t)
             self.hardware.stop()
             self.path = []
             self.local_planner.reset()
             self.state = next_state
             return 0.0, 0.0
+
+        # ------------------------------------------------------------- #
+        # Final-approach OPEN-LOOP CREEP (bypasses DWA on purpose).
+        #
+        # Confirmed by log evidence: the DWA scorer can settle on v=0 a few
+        # cm short of a perfectly valid, obstacle-free goal (goal 0.14m away,
+        # 0.16m of path left, v=0.00, front=0.54 -- nothing physically
+        # blocking it). Rather than keep tuning that scorer, once within
+        # GO_CREEP_DIST of the pillar estimate, stop trusting it: drive
+        # straight at a fixed speed with simple proportional heading
+        # correction, bounded by GO_CREEP_MAX_S so it can never hang.
+        # ------------------------------------------------------------- #
+        if dist_to_pw <= C.GO_CREEP_DIST:
+            if self._creep_target != target:
+                self._creep_target = target
+                self._creep_t0 = t
+            if (t - self._creep_t0) > C.GO_CREEP_MAX_S:
+                self.log.warning("%s: creep cap reached, forcing arrival (d2t=%.2fm)",
+                                 target, dist_to_pw)
+                self._creep_target = None
+                reached_cb(t)
+                self.hardware.stop()
+                self.path = []
+                self.local_planner.reset()
+                self.state = next_state
+                return 0.0, 0.0
+            bearing = wrap_angle(math.atan2(pw[1] - self.pose[1], pw[0] - self.pose[0])
+                                  - self.pose[2])
+            w = max(-C.W_MAX, min(C.W_MAX, C.GO_CREEP_KW * bearing))
+            return C.GO_CREEP_V, w
+        self._creep_target = None
+
         # keep the goal/standoff fresh as the estimate refines
         goal = self._pillar_standoff(pw)
         if (self.goal_world is None or pose_distance(goal, self.goal_world) > 0.15
@@ -465,7 +532,7 @@ class NavigationController:
                 return 0.0, 0.0
             self.path, self.goal_world = path, goal
             self._plan_stamp = t
-        v, w, near = self.drive_along_path(self.path, v_cap=C.V_CRUISE)
+        v, w, _near = self.drive_along_path(self.path, v_cap=C.V_CRUISE)
         return v, w
 
     def _on_blue_reached(self, t):
@@ -592,6 +659,13 @@ class NavigationController:
         self.t_start = self.hardware.time()
         self.log.info("start pose (odom) = (%.2f, %.2f, %.1f deg)",
                       self.pose[0], self.pose[1], math.degrees(self.pose[2]))
+        # config fingerprint: prove which build is actually running (rules out
+        # a stale cached module being picked up instead of the latest edits).
+        self.log.info(
+            "config fingerprint: V_MAX=%.2f V_CRUISE=%.2f DWA_TIGHT_GAP_VFRAC=%.2f "
+            "PILLAR_TOUCH_DIST=%.2f PILLAR_REACH_DIST_BLUE=%.2f file=%s",
+            C.V_MAX, C.V_CRUISE, C.DWA_TIGHT_GAP_VFRAC, C.PILLAR_TOUCH_DIST,
+            C.PILLAR_REACH_DIST_BLUE, os.path.abspath(C.__file__))
         self.events.event("run_start", sim_time=self.t_start, tick=0,
                           state=self.state, dt=self.dt,
                           start_xy=[round(self.pose[0], 3), round(self.pose[1], 3)],
@@ -660,12 +734,41 @@ class NavigationController:
         pois = int(self.occupancy_grid.poison.sum())
         pb = self.perception.pillar_world.get("blue") if self.perception else None
         py = self.perception.pillar_world.get("yellow") if self.perception else None
+        # DIAGNOSTIC: when actively chasing a pillar, print the exact numbers the
+        # arrival check (_go) is deciding on -- the live pillar_world estimate,
+        # the distance derived from it, and the live front-lidar range -- so a
+        # stall/recovery is provable from the log instead of guessed at.
+        target = ("blue" if self.state == MissionState.GO_BLUE else
+                  "yellow" if self.state == MissionState.GO_YELLOW else None)
+        diag = ""
+        if target is not None:
+            pw = self.perception.pillar_world.get(target) if self.perception else None
+            reach = C.PILLAR_REACH_DIST_BLUE if target == "blue" else C.PILLAR_REACH_DIST_YELLOW
+            front = LP.front_clearance(self.scan_body, half_width=0.15)
+            if pw is not None:
+                d2t = pose_distance(self.pose, pw)
+                diag = (f" tgt={target}@({pw[0]:+.2f},{pw[1]:+.2f}) d2t={d2t:.2f}"
+                        f"/{reach:.2f} front={front:.2f}/{C.PILLAR_TOUCH_DIST:.2f}")
+                # extra: what is the standoff GOAL/path actually targeting, and
+                # is the pure-pursuit carrot considered "at the goal" already?
+                # This distinguishes "DWA won't close the last stretch to a
+                # correct nearby goal" from "the goal itself was never placed
+                # close enough" -- the two remaining candidate root causes.
+                if self.goal_world is not None:
+                    d2g = pose_distance(self.pose, self.goal_world)
+                    plen = self._path_length(self.path) if self.path else 0.0
+                    diag += (f" goal=({self.goal_world[0]:+.2f},{self.goal_world[1]:+.2f})"
+                             f" d2goal={d2g:.2f} pathlen={plen:.2f} npts={len(self.path)}")
+                else:
+                    diag += " goal=None"
+            else:
+                diag = f" tgt={target}@unknown front={front:.2f}/{C.PILLAR_TOUCH_DIST:.2f}"
         self.log.info(
             "t=%6.1f %-13s pose=(%+.2f,%+.2f,%+6.1f) v=%.2f occ=%d pois=%d "
-            "blue=%s yellow=%s green_block=%s",
+            "blue=%s yellow=%s green_block=%s%s",
             t, self.state, self.pose[0], self.pose[1], math.degrees(self.pose[2]),
             self.cur_v, occ, pois, "Y" if pb else "-", "Y" if py else "-",
-            "Y" if self.green_block else "-")
+            "Y" if self.green_block else "-", diag)
         self.events.event("status", sim_time=t, tick=self.tick, state=self.state,
                           pose=[round(self.pose[0], 3), round(self.pose[1], 3),
                                 round(self.pose[2], 3)], v=round(self.cur_v, 3),

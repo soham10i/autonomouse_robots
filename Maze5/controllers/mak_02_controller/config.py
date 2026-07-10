@@ -47,12 +47,12 @@ IMU_NAME_CANDIDATES = ("imu inertial_unit", "imu inertial unit", "inertial unit"
 # ===========================================================================
 # Velocity limits  (fast on straights, smooth in corners)
 # ===========================================================================
-V_MAX = 0.80                    # m/s nominal forward cap on open straights
-V_CRUISE = 0.70                 # m/s typical corridor speed
+V_MAX = 1.50                    # m/s nominal forward cap on open straights
+V_CRUISE = 1.30                 # m/s typical corridor speed
 V_MIN = 0.05                    # m/s
-W_MAX = 3.5                     # rad/s
-A_V = 1.5                       # m/s^2 translational accel cap (smoothness)
-A_W = 10.0                      # rad/s^2 angular accel cap (snappy but smooth corners)
+W_MAX = 4.5                     # rad/s
+A_V = 3.0                       # m/s^2 translational accel cap (smoothness)
+A_W = 12.0                      # rad/s^2 angular accel cap (snappy but smooth corners)
 WHEEL_ANG_MAX = V_MAX / WHEEL_RADIUS * 1.6   # rad/s saturation per wheel
 
 # ===========================================================================
@@ -115,7 +115,7 @@ EXPL_MAX_RADIUS_M = 6.0         # m from start; do not chase frontiers past this
 UTIL_INFO_W = 1.0               # utility = INFO_W*cluster - DIST_W*path_len
 UTIL_DIST_W = 1.3
 INITIAL_SCAN_REVS = 1.0         # spin this many revolutions to seed the map
-INIT_SPIN_W = 1.5               # rad/s during the seed spin
+INIT_SPIN_W = 2.2               # rad/s during the seed spin (same coverage, faster)
 
 # ===========================================================================
 # Path following (pure pursuit carrot for the DWA layer)
@@ -143,10 +143,25 @@ DWA_W_DIST = 1.2              # end the rollout near the carrot
 DWA_W_CLEAR = 0.85            # clearance (corridor centring + wall avoidance)
 DWA_W_SPEED = 0.18           # mild preference for moving
 DWA_W_STRAIGHT = 0.10        # penalty on |w|, damps oscillation
-DWA_SLOWDOWN_DIST = 0.55     # m, scale v down as the obstacle AHEAD approaches
-DWA_SIDE_SLOW_DIST = 0.34    # m, below this lateral clearance -> thread slowly
+DWA_SLOWDOWN_DIST = 0.55     # m, poison-lookup radius only (see _poison_body);
+                             # NOT used as a DWA speed cap any more (see below)
 DWA_LIDAR_SUBSAMPLE = 110    # cap lidar points used per rollout (speed)
 DWA_SEARCH_W = 1.0           # in-place spin (rad/s) when fully boxed in
+# Speed policy: NO compounding proximity slowdown (heading x front-cone x
+# side-wall factors used to multiply together and crush v_top to ~0 near any
+# corner/pillar, freezing the robot short of the reach threshold). Speed is
+# governed ONLY by per-rollout clearance rejection below, plus ONE clean,
+# non-compounding tight-gap factor and a pivot gate for large carrot bearings.
+DWA_TIGHT_GAP_DIST = 0.22    # m, lateral clearance below which to ease off
+DWA_TIGHT_GAP_VFRAC = 0.80   # floor of the tight-gap speed factor (raised: Maze5's
+                             # corridors keep side clearance under DWA_TIGHT_GAP_DIST
+                             # almost everywhere, so this floor was acting as a
+                             # near-constant global speed cap, not an occasional
+                             # tight-gap easing; actual collision safety is still
+                             # enforced independently by the per-rollout DWA_SAFE_RADIUS
+                             # rejection, so raising the floor doesn't reduce safety)
+DWA_PIVOT_BEARING = 0.6      # rad (~34 deg) carrot offset above which we pivot
+DWA_PIVOT_MIN_DIST = 0.18    # m, don't pivot for a carrot already this close
 
 # ===========================================================================
 # Green-poison safety reflex (drift-immune)
@@ -200,8 +215,31 @@ GREEN_PROJECT_MAX_RANGE = 3.0   # m, drop far (noisy) green projections (keeps m
 # ===========================================================================
 # Mission / logging
 # ===========================================================================
-PILLAR_REACH_DIST_BLUE = 0.75   # m, mission "reached the pillar" threshold (centre dist)
+PILLAR_REACH_DIST_BLUE = 0.45   # m, mission "reached the pillar" threshold (centre dist);
+                                 # matches YELLOW so BLUE isn't declared reached from as
+                                 # far out as 0.75 m -- get closer before turning away
 PILLAR_REACH_DIST_YELLOW = 0.45 # m, reach threshold for yellow pillar (get closer)
+# Simple, ground-truth arrival check: the camera-based pillar_world estimate
+# is a running average that can drift once the robot is very close (clipped
+# colour blob, close-range depth noise), so pose_distance(pose, pw) can stay
+# stuck above PILLAR_REACH_DIST forever even though the robot is visibly
+# touching the pillar. PILLAR_TOUCH_DIST is compared against the LIVE lidar
+# range straight ahead instead -- once GO_BLUE/GO_YELLOW has committed to a
+# target, the only thing that close ahead of the robot IS the pillar, so
+# this is a direct, reliable "am I basically touching it" test.
+PILLAR_TOUCH_DIST = 0.30        # m, live-lidar front range that counts as reached
+# Final-approach OPEN-LOOP CREEP: confirmed by log evidence (goal only 0.14m
+# away, 0.16m of path left, v=0.00) that the DWA scorer can settle on v=0 a
+# few cm short of a perfectly valid, obstacle-free goal instead of closing
+# the gap. Rather than keep tuning that scorer, once within GO_CREEP_DIST of
+# the (already-known-accurate) pillar estimate, stop trusting it: drive
+# straight at a fixed speed with simple proportional heading correction, for
+# up to GO_CREEP_MAX_S, then declare arrival unconditionally. Deterministic
+# and can never stall.
+GO_CREEP_DIST = 1.2             # m, switch from DWA to open-loop creep this close
+GO_CREEP_V = 0.45               # m/s, fixed creep speed
+GO_CREEP_KW = 2.0               # rad/s per rad of bearing error
+GO_CREEP_MAX_S = 6.0            # s, hard cap -- force arrival after this regardless
 GO_FAIL_COOLDOWN_S = 2.5        # s, after a failed GO, explore this long before retry
 NO_FRONTIER_SPIN_S = 4.0        # s, spin-and-rescan when no frontier is available
 PERCEPTION_EVERY_TICKS = 2      # run colour perception every N ticks

@@ -19,23 +19,64 @@ from geometry import inverse_transform_points, wrap_angle
 #  Pure pursuit — pick the carrot on the path
 # --------------------------------------------------------------------------- #
 def choose_carrot(path_world, pose, v_cur):
-    """Return the look-ahead point (wx, wy) on ``path_world`` and goal flag."""
+    """Return the look-ahead point (wx, wy) on ``path_world`` and a goal flag.
+
+    Arc-length pure pursuit: project the robot onto the path POLYLINE (nearest
+    point on the nearest *segment*, not the nearest vertex), then walk ``look``
+    metres forward ALONG the path from that projection and interpolate the
+    carrot there. The earlier "first vertex >= look away, starting from the
+    closest vertex" shortcut aims BACKWARD once the robot passes the start of
+    a line-of-sight-simplified straight segment (A* collapses an open run to
+    just [start, goal], so the start vertex stays closest while sitting >=
+    look behind the robot -> the carrot snaps back and the robot pivots
+    around). Projecting along the segment guarantees the carrot is always
+    ahead of the robot's progress.
+    """
     if not path_world:
         return None, True
     x, y = pose[0], pose[1]
     look = C.LOOKAHEAD_BASE + C.LOOKAHEAD_K_V * max(0.0, v_cur)
     look = max(C.LOOKAHEAD_MIN, min(C.LOOKAHEAD_MAX, look))
     goal = path_world[-1]
-    # find the furthest path point within look-ahead of the robot, walking from
-    # the closest point forward so we never aim at an already-passed segment.
-    d2 = [(px - x) ** 2 + (py - y) ** 2 for px, py in path_world]
-    i0 = int(np.argmin(d2))
-    carrot = path_world[-1]
-    for i in range(i0, len(path_world)):
-        px, py = path_world[i]
-        if math.hypot(px - x, py - y) >= look:
-            carrot = (px, py)
+    if len(path_world) == 1:
+        return goal, math.hypot(goal[0] - x, goal[1] - y) <= C.LOOKAHEAD_MAX
+
+    # 1) nearest point on the polyline -> (segment index, projection point)
+    best_d2 = float("inf")
+    seg_i = 0
+    proj = path_world[0]
+    for i in range(len(path_world) - 1):
+        ax, ay = path_world[i]
+        bx, by = path_world[i + 1]
+        dx, dy = bx - ax, by - ay
+        seg_len2 = dx * dx + dy * dy
+        if seg_len2 < 1e-12:
+            t = 0.0
+            pxs, pys = ax, ay
+        else:
+            t = ((x - ax) * dx + (y - ay) * dy) / seg_len2
+            t = max(0.0, min(1.0, t))
+            pxs, pys = ax + t * dx, ay + t * dy
+        d2 = (x - pxs) ** 2 + (y - pys) ** 2
+        if d2 < best_d2:
+            best_d2 = d2
+            seg_i = i
+            proj = (pxs, pys)
+
+    # 2) walk `look` metres forward along the path from that projection
+    remaining = look
+    cx, cy = proj
+    carrot = goal
+    for i in range(seg_i, len(path_world) - 1):
+        bx, by = path_world[i + 1]
+        seg = math.hypot(bx - cx, by - cy)
+        if seg >= remaining:
+            f = remaining / seg if seg > 1e-9 else 0.0
+            carrot = (cx + (bx - cx) * f, cy + (by - cy) * f)
             break
+        remaining -= seg
+        cx, cy = bx, by
+
     near_goal = math.hypot(goal[0] - x, goal[1] - y) <= C.LOOKAHEAD_MAX
     if near_goal:
         carrot = goal
@@ -71,22 +112,13 @@ class DWAPlanner:
             return float("inf")
         return float(np.min(np.hypot(obs[:, 0], obs[:, 1])))
 
-    def _front_dist(self, obs, half_width=0.22):
-        """Nearest obstacle in the forward travel corridor (for the speed cap).
+    def _side_clearance(self, obs, long_window=0.30):
+        """Nearest lateral obstacle alongside the robot (|x| < window), or inf.
 
-        Using the front cone (not the global nearest) lets the robot keep speed
-        on a straight corridor whose side walls are close but the path ahead is
-        clear, instead of crawling the whole way.
+        Drives the single tight-gap speed factor: in a genuinely narrow passage
+        the robot eases off for precise centring. Unlike the deleted compounding
+        caps this is ONE floored factor, active only below DWA_TIGHT_GAP_DIST.
         """
-        if obs.shape[0] == 0:
-            return float("inf")
-        ahead = (obs[:, 0] > 0.0) & (np.abs(obs[:, 1]) < half_width)
-        if not ahead.any():
-            return float("inf")
-        return float(np.min(obs[ahead, 0]))
-
-    def _side_dist(self, obs, long_window=0.35):
-        """Nearest lateral obstacle alongside the robot (for threading speed)."""
         if obs.shape[0] == 0:
             return float("inf")
         beside = np.abs(obs[:, 0]) < long_window
@@ -111,25 +143,33 @@ class DWAPlanner:
         carrot_bearing = math.atan2(cy, cx)
         carrot_dist = math.hypot(cx, cy)
 
-        # forward-speed ceiling: slow for a sharp redirect, brake for obstacles
-        # actually ahead (front cone) — NOT for corridor side walls.
-        front = self._front_dist(obs)
+        # ----------------------------------------------------------------- #
+        #  Speed policy: NO compounding proximity slowdown. Heading-misalign
+        #  x front-cone x side-wall factors used to multiply together and
+        #  compound to a near-zero crawl near any corner or pillar -- the
+        #  robot would stall short of the pillar reach threshold and loop in
+        #  RECOVERY forever without net progress. Speed is governed ONLY by
+        #  the per-rollout clearance rejection in the scoring loop below --
+        #  a fast straight rollout that would approach a wall is rejected, so
+        #  the planner keeps full speed when the path AHEAD is clear. ONE
+        #  clean, non-compounding gate remains: pivot in place when the
+        #  carrot is far off the nose, so the skid-steer rotates to face it
+        #  instead of carving a wide wall-clipping arc.
+        # ----------------------------------------------------------------- #
         v_top = C.V_MAX if v_cap is None else min(C.V_MAX, v_cap)
-        v_top *= max(0.25, 1.0 - abs(carrot_bearing) / 1.4)
-        if front < C.DWA_SLOWDOWN_DIST:
-            frac = (front - C.DWA_SAFE_RADIUS) / max(1e-3, C.DWA_SLOWDOWN_DIST - C.DWA_SAFE_RADIUS)
-            v_top *= max(0.0, min(1.0, frac))
-        # thread tight passages slowly (walls close on the sides), open ones fast
-        side = self._side_dist(obs)
-        if side < C.DWA_SIDE_SLOW_DIST:
-            sfrac = (side - C.DWA_SAFE_RADIUS) / max(1e-3, C.DWA_SIDE_SLOW_DIST - C.DWA_SAFE_RADIUS)
-            v_top *= max(0.35, min(1.0, sfrac))
-        v_top = max(0.0, min(C.V_MAX, v_top))
         if green_block:
             v_top = 0.0   # never push forward onto poison
+        # single tight-gap speed factor (floored -> never a crawl): ease off only
+        # when a side wall is genuinely close, for precise centreline threading.
+        side = self._side_clearance(obs)
+        if side < C.DWA_TIGHT_GAP_DIST:
+            sfrac = (side - C.DWA_SAFE_RADIUS) / max(1e-3, C.DWA_TIGHT_GAP_DIST - C.DWA_SAFE_RADIUS)
+            v_top *= max(C.DWA_TIGHT_GAP_VFRAC, min(1.0, sfrac))
+        pivot = (abs(carrot_bearing) > C.DWA_PIVOT_BEARING
+                 and carrot_dist > C.DWA_PIVOT_MIN_DIST)
 
         dt = C.DWA_STEP_S
-        if v_top > 1e-3:
+        if v_top > 1e-3 and not pivot:
             v_samples = list(np.linspace(0.0, v_top, C.DWA_V_SAMPLES))
         else:
             v_samples = [0.0]
@@ -140,6 +180,16 @@ class DWAPlanner:
         n_steps = max(2, int(C.DWA_HORIZON_S / dt))
         best_score = -1e18
         best = None
+
+        # pre-calculate initial clearance to allow squeezing out of violated margins:
+        # if the robot's CURRENT position is already inside DWA_SAFE_RADIUS of an
+        # obstacle (e.g. standing right at a pillar/corner standoff point), a naive
+        # "reject anything under SAFE_RADIUS" check rejects even v=0 forever (the
+        # rollout never leaves the violated position) -> permanent freeze. Only
+        # reject a rollout that makes the violated clearance WORSE.
+        initial_clear = float("inf")
+        if obs.shape[0] > 0:
+            initial_clear = float(np.min(np.hypot(obs[:, 0], obs[:, 1])))
 
         for v in v_samples:
             for w in w_samples:
@@ -152,10 +202,10 @@ class DWAPlanner:
                     y += v * math.sin(th) * dt
                     th += w * dt
                     if obs.shape[0] > 0:
-                        d = np.min(np.hypot(obs[:, 0] - x, obs[:, 1] - y))
+                        d = float(np.min(np.hypot(obs[:, 0] - x, obs[:, 1] - y)))
                         if d < min_clear:
                             min_clear = d
-                        if d < C.DWA_SAFE_RADIUS:
+                        if d < C.DWA_SAFE_RADIUS and d < initial_clear - 1e-5:
                             collide = True
                             break
                 if collide:

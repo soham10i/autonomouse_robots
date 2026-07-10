@@ -76,23 +76,40 @@ class Perception:
             return None
         ys, xs = np.nonzero(mask)
         cu, cv = float(xs.mean()), float(ys.mean())
-        pix_h = int(ys.max() - ys.min() + 1)
-        pix_w = int(xs.max() - xs.min() + 1)
+        y0, y1 = int(ys.min()), int(ys.max())
+        x0, x1 = int(xs.min()), int(xs.max())
+        pix_h = int(y1 - y0 + 1)
+        pix_w = int(x1 - x0 + 1)
         aspect = (pix_w / pix_h) if pix_h > 0 else float("nan")
+        # If the blob runs off the top/bottom of the frame, pix_h no longer
+        # spans the pillar's TRUE height, so the height-based range (which
+        # assumes pix_h == full physical height) silently OVERESTIMATES range.
+        # If it runs off the LEFT/RIGHT edge instead, the centroid `cu` -- and
+        # therefore the BEARING derived from it -- is biased toward whichever
+        # side is still visible, which misplaces the projected world position
+        # sideways (this is the one that actually bit us: it fires at ANY
+        # range whenever the pillar sweeps across frame edge while the robot
+        # turns to face it, not just up close). Reject the WHOLE detection
+        # when either happens rather than trying to patch just the range,
+        # since bearing is used regardless of which range source is picked.
+        clipped_v = (y0 <= 1) or (y1 >= self.h - 2)
+        clipped_h = (x0 <= 1) or (x1 >= self.w - 2)
+        clipped = clipped_v or clipped_h
         rng_d = self._depth_at(depth, cu, cv)
-        # range from known pillar height (works at close range where depth blinds)
-        rng_h = (self.fx * C.PILLAR_HEIGHT / pix_h) if pix_h > 0 else float("nan")
+        rng_h = (self.fx * C.PILLAR_HEIGHT / pix_h) if (pix_h > 0 and not clipped_v) else float("nan")
         if np.isfinite(rng_d) and 0.0 < rng_d <= C.PILLAR_MAX_DETECT_RANGE:
             rng = rng_d
         else:
             rng = rng_h
-        est_h = (pix_h * rng / self.fx) if (np.isfinite(rng) and rng > 0) else float("nan")
+        est_h = (pix_h * rng / self.fx) if (np.isfinite(rng) and rng > 0 and not clipped_v) else float("nan")
         bearing = -math.atan2(cu - self.cx, self.fx)
         return {"u": cu, "v": cv, "area": area, "bearing": bearing,
-                "range": rng, "est_height": est_h, "aspect": aspect}
+                "range": rng, "est_height": est_h, "aspect": aspect, "clipped": clipped}
 
     def _valid(self, det):
         if det is None:
+            return False
+        if det["clipped"]:
             return False
         rng = det["range"]
         if not (np.isfinite(rng) and 0.0 < rng <= C.PILLAR_MAX_DETECT_RANGE):
