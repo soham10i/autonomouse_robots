@@ -77,9 +77,13 @@ def choose_carrot(path_world, pose, v_cur):
         remaining -= seg
         cx, cy = bx, by
 
+    # NOTE: do NOT override `carrot` with the raw `goal` here.
+    # Within LOOKAHEAD_MAX the old code forced carrot = goal (the pillar world
+    # position), which drew a straight line from the robot through whatever wall
+    # happened to separate them — exactly the "goes straight into a wall" failure
+    # visible in GO_YELLOW.  The path-interpolated carrot already converges to the
+    # final waypoint as the robot approaches; no override is needed.
     near_goal = math.hypot(goal[0] - x, goal[1] - y) <= C.LOOKAHEAD_MAX
-    if near_goal:
-        carrot = goal
     return carrot, near_goal
 
 

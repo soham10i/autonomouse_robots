@@ -210,6 +210,10 @@ WAYPOINT_REACH_TOL = 0.16       # m
 GOAL_REACH_TOL = 0.16           # m
 REPLAN_PERIOD_S = 1.0           # s, global replan cadence
 PATH_SIMPLIFY = True            # line-of-sight shortcut the A* path
+CLOSE_GOAL_DIST = 1.2           # m — paths shorter than this skip simplification entirely;
+                                 # near the goal the dense A* waypoints are essential for
+                                 # threading the final corridor; a 2-point straight-line
+                                 # collapse aims through walls and causes the GO_YELLOW freeze
 
 # ===========================================================================
 # DWA local planner (drives toward the carrot using LIVE lidar + aux)
@@ -316,10 +320,13 @@ PILLAR_RADIUS = 0.10            # m
 PILLAR_HEIGHT = 0.30            # m
 PILLAR_MIN_PIXELS = 6           # min coloured blob area (lowered: detect at longer range)
 PILLAR_MAX_DETECT_RANGE = 5.0   # m
+PILLAR_MIN_DETECT_RANGE = 0.30  # m, reject implausibly close/noisy estimates (side-view spin)
 PILLAR_HEIGHT_MIN_FRAC = 0.15   # accept more height variance at long range
 PILLAR_HEIGHT_MAX_FRAC = 2.00
 PILLAR_ASPECT_MAX = 2.2         # reject wide blobs (walls share the colour rarely)
-PILLAR_OBS_AVG_N = 3            # running mean window for world position (lowered: confirm faster)
+PILLAR_OBS_AVG_N = 6           # running mean window — raised from 3: more observations
+                                 # before locking a world estimate; filters the unreliable
+                                 # side-view detections during the INIT_SCAN 360° spin
 PILLAR_OUTLIER_REJECT_M = 1.2   # m, discard detections this far from the mean
 GREEN_PROJECT_STRIDE = 3        # subsample factor when projecting green floor
 GREEN_PROJECT_MAX_RANGE = 3.0   # m, drop far (noisy) green projections (keeps map crisp)
@@ -327,7 +334,8 @@ GREEN_PROJECT_MAX_RANGE = 3.0   # m, drop far (noisy) green projections (keeps m
 # ===========================================================================
 # Mission / logging
 # ===========================================================================
-PILLAR_REACH_DIST = 0.35        # m, mission "reached the pillar" threshold (centre dist)
+PILLAR_REACH_DIST_BLUE   = 0.15  # m, "reached BLUE pillar" threshold  — tune independently
+PILLAR_REACH_DIST_YELLOW = 0.30  # m, "reached YELLOW pillar" threshold — tune independently
 GO_FAIL_COOLDOWN_S = 2.5        # s, after a failed GO, explore this long before retry
 NO_FRONTIER_SPIN_S = 4.0        # s, spin-and-rescan when no frontier is available
 PERCEPTION_EVERY_TICKS = 2      # run colour perception every N ticks

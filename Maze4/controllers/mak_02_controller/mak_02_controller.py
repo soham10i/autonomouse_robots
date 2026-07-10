@@ -523,7 +523,8 @@ class NavigationController:
         """Simulation time of the most recent successful plan (or ``-inf``)."""
         return getattr(self, "_plan_stamp", -1e9)
 
-    def _go(self, target, next_state, t, reached_cb):
+    def _go(self, target, next_state, t, reached_cb,
+             reach_dist=C.PILLAR_REACH_DIST_BLUE):
         """Drive to a known pillar; on arrival fire ``reached_cb`` and advance."""
         pw = self.perception.pillar_world.get(target) if self.perception else None
         if pw is None:
@@ -531,7 +532,7 @@ class NavigationController:
                 if target == "blue" else MissionState.EXPLORE_YELLOW)
             return 0.0, 0.0
         # arrival check
-        if pose_distance(self.pose, pw) <= C.PILLAR_REACH_DIST:
+        if pose_distance(self.pose, pw) <= reach_dist:
             reached_cb(t)
             self.hardware.stop()
             self.path = []
@@ -541,7 +542,7 @@ class NavigationController:
             return 0.0, 0.0
         # keep the goal fresh as the estimate refines
         goal = pw
-        if (self.goal_world is None or pose_distance(goal, self.goal_world) > 0.15
+        if (self.goal_world is None or pose_distance(goal, self.goal_world) > 0.40
                 or not self.path or (t - self._last_plan_t()) > C.REPLAN_PERIOD_S):
             path = self.plan_path_to(goal)
             if path is None:
@@ -600,11 +601,13 @@ class NavigationController:
         if st == MissionState.EXPLORE_BLUE:
             return self._explore("blue", MissionState.GO_BLUE, t)
         if st == MissionState.GO_BLUE:
-            return self._go("blue", MissionState.EXPLORE_YELLOW, t, self._on_blue_reached)
+            return self._go("blue", MissionState.EXPLORE_YELLOW, t, self._on_blue_reached,
+                           reach_dist=C.PILLAR_REACH_DIST_BLUE)
         if st == MissionState.EXPLORE_YELLOW:
             return self._explore("yellow", MissionState.GO_YELLOW, t)
         if st == MissionState.GO_YELLOW:
-            return self._go("yellow", MissionState.DONE, t, self._on_yellow_reached)
+            return self._go("yellow", MissionState.DONE, t, self._on_yellow_reached,
+                           reach_dist=C.PILLAR_REACH_DIST_YELLOW)
         if st == MissionState.RECOVERY:
             return self._run_recovery(t)
         # DONE

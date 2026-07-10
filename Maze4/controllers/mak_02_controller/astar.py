@@ -125,8 +125,17 @@ def simplify(cells, lethal, cost=None):
     Pass ``cost`` (the costmap) to keep shortcuts out of tight passages so the
     dense, centred A* path is preserved where clearance is scarce; omit it for
     the plain lethal-only behaviour.
+
+    Paths shorter than ``C.CLOSE_GOAL_DIST`` are NEVER simplified: near the goal
+    the dense A* waypoints are critical for threading the final corridor.  A
+    2-point straight-line collapse at close range aims directly through whatever
+    wall separates the robot from the pillar, causing the GO_YELLOW freeze.
     """
     if not C.PATH_SIMPLIFY or cells is None or len(cells) <= 2:
+        return cells
+    # --- guard: skip simplification when the path is short (final approach) ---
+    path_len_m = (len(cells) - 1) * C.GRID_RESOLUTION
+    if path_len_m < C.CLOSE_GOAL_DIST:
         return cells
     max_cost = C.SIMPLIFY_MAX_COST if cost is not None else None
     out = [cells[0]]

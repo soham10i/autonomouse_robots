@@ -95,7 +95,7 @@ class Perception:
         if det is None:
             return False
         rng = det["range"]
-        if not (np.isfinite(rng) and 0.0 < rng <= C.PILLAR_MAX_DETECT_RANGE):
+        if not (np.isfinite(rng) and C.PILLAR_MIN_DETECT_RANGE <= rng <= C.PILLAR_MAX_DETECT_RANGE):
             return False
         est_h = det["est_height"]
         if np.isfinite(est_h):
