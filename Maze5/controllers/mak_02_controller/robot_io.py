@@ -1,10 +1,15 @@
-"""Webots device discovery and I/O for the ROSbot.
+"""Webots hardware abstraction and device I/O boundary layer.
 
-The ONLY module that imports the Webots ``controller`` runtime, so it is the
-only one that needs the simulator.  Everything else consumes plain NumPy arrays
-and pose tuples and stays simulator-agnostic / testable.
+Serves as the exclusive bridge between the simulated Webots `controller` API and
+the decoupled navigation logic. Discovers all necessary sensors and actuators,
+and exposes them via resilient polling methods returning plain NumPy arrays and
+standard Python types. Defensive exception barriers prevent intermittent hardware
+faults from crashing the core controller.
 """
 from __future__ import annotations
+
+import logging
+from typing import Any, Optional
 
 import numpy as np
 
@@ -15,8 +20,17 @@ from geometry import cmd_to_wheels
 from observability import get_logger
 
 
-def _first_device(robot, names):
-    """Return ``(device, name)`` for the first present name, else ``(None, None)``."""
+def _first_device(robot: Any, names: list[str]) -> tuple[Any, Optional[str]]:
+    """Searches sequentially for the first successfully retrieved device.
+
+    Args:
+        robot (Robot): The primary Webots Robot API instance.
+        names (list[str]): A list of string device names to probe for.
+
+    Returns:
+        tuple[Any, Optional[str]]: A tuple containing the `(device_handle, name)`
+            if found; otherwise `(None, None)`.
+    """
     for n in names:
         d = robot.getDevice(n)
         if d is not None:
@@ -25,20 +39,37 @@ def _first_device(robot, names):
 
 
 class RobotInterface:
-    """The single Webots-facing device layer for the ROSbot.
+    """The central hardware interaction layer for the ROSbot.
 
-    This is the only module that imports the Webots ``controller`` runtime; it
-    discovers the motors, encoders, lidar and cameras and exposes them as plain
-    NumPy arrays and scalars. Every read is defensive: a device that raises or
-    returns nothing yields the documented safe fallback (``None``) plus a logged
-    warning, so a flaky sensor degrades the run instead of crashing the controller.
+    Initializes motors, encoders, IMU, Lidar, and depth/RGB cameras. Wraps
+    the `robot.step()` clock function and provides safe getters and setters
+    for actuating the platform.
+
+    Attributes:
+        log (logging.Logger): The dedicated IO diagnostic logger.
+        robot (Robot): The underlying Webots Robot instance.
+        timestep (int): Fundamental simulation timestep in milliseconds.
+        dt (float): Timestep converted to seconds.
+        motors (list[Any]): A list of Webots Motor instances (fl, fr, rl, rr).
+        encoders (list[Any]): A list of Webots PositionSensor instances.
+        lidar (Any): The primary Webots Lidar instance.
+        camera (Any): The Webots Camera instance for RGB imaging.
+        depth (Any): The Webots RangeFinder or alternate camera for depth sensing.
+        depth_name (Optional[str]): The string identifier of the discovered depth device.
+        imu (Any): The Webots InertialUnit providing global yaw.
+        imu_name (Optional[str]): The string identifier of the discovered IMU.
+        keyboard (Any): The Webots Keyboard interface for manual intervention.
     """
 
-    def __init__(self, logger=None):
-        """Discover and enable all devices; a missing wheel motor is fatal.
+    def __init__(self, logger: Optional[logging.Logger] = None) -> None:
+        """Discovers, configures, and enables all required simulation devices.
+
+        A missing drive motor raises an immediate RuntimeError, as locomotion
+        is strictly mandatory. Other peripheral failures are logged as warnings.
 
         Args:
-            logger: Optional shared logger; a dedicated one is created if omitted.
+            logger (Optional[logging.Logger], optional): An externally provided logger.
+                If None, a module-specific logger is initialized.
         """
         self.log = logger or get_logger("navctl.robot_io")
         self.robot = Robot()
@@ -88,8 +119,12 @@ class RobotInterface:
         self._log_inventory()
 
     # ------------------------------------------------------------- logging
-    def device_inventory(self):
-        """Return a serialisable summary of which devices were discovered."""
+    def device_inventory(self) -> dict[str, Any]:
+        """Provides a serialized summary of successfully initialized hardware.
+
+        Returns:
+            dict[str, Any]: A dictionary detailing the operational status of components.
+        """
         present = lambda d: d is not None
         return {
             "timestep_ms": self.timestep,
@@ -101,8 +136,8 @@ class RobotInterface:
             "imu": present(self.imu),
         }
 
-    def _log_inventory(self):
-        """Log the discovered-device inventory at startup for fault tracing."""
+    def _log_inventory(self) -> None:
+        """Internal routine to emit the device discovery state to the system log."""
         ok = lambda d: "OK" if d is not None else "MISSING"
         self.log.info("timestep = %d ms", self.timestep)
         self.log.info("motors=%s encoders=%s",
@@ -112,21 +147,34 @@ class RobotInterface:
                       ok(self.imu), self.imu_name)
 
     # ---------------------------------------------------------------- step
-    def step(self):
-        """Advance the simulation one basic timestep; returns -1 when Webots exits."""
+    def step(self) -> int:
+        """Advances the Webots simulation clock by one atomic timestep.
+
+        Returns:
+            int: The return code from `robot.step()`. A value of -1 indicates
+                the simulation is terminating.
+        """
         return self.robot.step(self.timestep)
 
-    def time(self):
-        """Current simulation time in seconds."""
+    def time(self) -> float:
+        """Queries the current simulation clock time.
+
+        Returns:
+            float: The elapsed simulation time in seconds.
+        """
         return self.robot.getTime()
 
     # -------------------------------------------------------------- motors
-    def set_cmd(self, v, w):
-        """Command body velocity ``(v, w)`` by driving the wheel motors.
+    def set_cmd(self, v: float, w: float) -> None:
+        """Actuates the drivetrain motors to achieve the target body velocities.
 
-        Maps ``(v, w)`` to left/right wheel angular velocities, clamps them to
-        the drive limit, and applies them. A motor-write failure is logged but
-        never propagated, so one bad actuation cannot crash the control loop.
+        Translates target linear and angular velocity into independent left and
+        right wheel speeds, clamps them to mechanical limits, and dispatches the
+        commands to the Webots Motor devices. Failures are caught and logged.
+
+        Args:
+            v (float): Target forward linear velocity in meters/second.
+            w (float): Target rotational velocity in radians/second.
         """
         self._cmd_v, self._cmd_w = v, w
         wl, wr = cmd_to_wheels(v, w)
@@ -142,16 +190,21 @@ class RobotInterface:
         except Exception as exc:  # noqa: BLE001 - actuation write barrier
             self.log.error("motor command failed (v=%.2f w=%.2f): %s", v, w, exc)
 
-    def stop(self):
-        """Command zero velocity (halt the robot)."""
+    def stop(self) -> None:
+        """Immediately commands all motors to halt (zero velocity)."""
         self.set_cmd(0.0, 0.0)
 
     # ------------------------------------------------------------- sensors
-    def read_encoders(self):
-        """Return ``(left_rad, right_rad)`` averaged front/rear, or ``(None, None)``.
+    def read_encoders(self) -> tuple[Optional[float], Optional[float]]:
+        """Reads and aggregates the current wheel encoder values.
 
-        Returns ``(None, None)`` if any encoder is absent or a read raises, so
-        odometry can skip the tick rather than propagate a device fault.
+        Averages the front and rear encoder pairs into a single effective
+        left and right reading. Intermittent read failures yield `None`.
+
+        Returns:
+            tuple[Optional[float], Optional[float]]: A tuple containing the
+                `left_rad, right_rad` total accumulated angles, or `(None, None)`
+                if any hardware is faulty.
         """
         if any(e is None for e in self.encoders):
             return None, None
@@ -162,8 +215,12 @@ class RobotInterface:
             return None, None
         return 0.5 * (fl + rl), 0.5 * (fr + rr)
 
-    def read_yaw(self):
-        """Return the IMU yaw in radians, or ``None`` if unavailable/faulted."""
+    def read_yaw(self) -> Optional[float]:
+        """Polls the onboard IMU for the absolute heading (yaw) angle.
+
+        Returns:
+            Optional[float]: The yaw angle in radians, or None if reading fails.
+        """
         if self.imu is None:
             return None
         try:
@@ -172,8 +229,13 @@ class RobotInterface:
             self.log.warning("imu read failed: %s", exc)
             return None
 
-    def read_lidar_ranges(self):
-        """Return the raw lidar range image as a float32 array, or ``None``."""
+    def read_lidar_ranges(self) -> Optional[np.ndarray]:
+        """Fetches the latest planar Lidar range array.
+
+        Returns:
+            Optional[np.ndarray]: A 1D float32 array of range distances in meters,
+                ordered sequentially. Returns None if the device fails.
+        """
         if self.lidar is None:
             return None
         try:
@@ -182,15 +244,28 @@ class RobotInterface:
             self.log.warning("lidar read failed: %s", exc)
             return None
 
-    def lidar_specs(self):
-        """Return ``(n_beams, fov, min_range, max_range)`` or ``None`` if no lidar."""
+    def lidar_specs(self) -> Optional[tuple[int, float, float, float]]:
+        """Queries the immutable configuration parameters of the Lidar.
+
+        Returns:
+            Optional[tuple[int, float, float, float]]: A tuple detailing
+                `(n_beams, fov_rad, min_range_m, max_range_m)`, or None.
+        """
         if self.lidar is None:
             return None
         return (self.lidar.getHorizontalResolution(), self.lidar.getFov(),
                 self.lidar.getMinRange(), self.lidar.getMaxRange())
 
-    def read_rgb_bgr(self):
-        """Return the RGB camera frame as an ``(H, W, 3)`` BGR uint8 array, or ``None``."""
+    def read_rgb_bgr(self) -> Optional[np.ndarray]:
+        """Retrieves and processes the latest camera image frame.
+
+        Webots returns BGRA memory arrays; this strips the alpha channel to emit
+        a pure BGR matrix natively consumable by the perception logic.
+
+        Returns:
+            Optional[np.ndarray]: An ``(H, W, 3)`` uint8 array representing the
+                camera frame in BGR order. Returns None on fault.
+        """
         if self.camera is None:
             return None
         try:
@@ -204,8 +279,13 @@ class RobotInterface:
             self.log.warning("rgb camera read failed: %s", exc)
             return None
 
-    def read_depth(self):
-        """Return the depth range image as an ``(H, W)`` float32 array, or ``None``."""
+    def read_depth(self) -> Optional[np.ndarray]:
+        """Retrieves the latest output from the depth or range-finder sensor.
+
+        Returns:
+            Optional[np.ndarray]: A 2D float32 array of size ``(H, W)`` encoding
+                z-depth distances in meters. Returns None on fault.
+        """
         if self.depth is None:
             return None
         try:
@@ -218,14 +298,22 @@ class RobotInterface:
             self.log.warning("depth camera read failed: %s", exc)
             return None
 
-    def camera_specs(self):
-        """Return ``(width, height, fov)`` of the RGB camera, or ``None``."""
+    def camera_specs(self) -> Optional[tuple[int, int, float]]:
+        """Queries the intrinsic dimension parameters of the RGB camera.
+
+        Returns:
+            Optional[tuple[int, int, float]]: A tuple describing `(width, height, fov_rad)`.
+        """
         if self.camera is None:
             return None
         return (self.camera.getWidth(), self.camera.getHeight(), self.camera.getFov())
 
-    def poll_key(self):
-        """Drain and return the set of keyboard key codes pressed this tick."""
+    def poll_key(self) -> set[int]:
+        """Drains the keyboard input buffer since the last polling tick.
+
+        Returns:
+            set[int]: A set of integer keycodes that were actively pressed.
+        """
         keys = set()
         while True:
             k = self.keyboard.getKey()

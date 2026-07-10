@@ -232,6 +232,17 @@ def main():
     check("confirmed aux cell is lethal in the costmap",
           grid2.build_costmap()[1][grid2.world_to_grid(ex, ey)])
 
+    # WIDER curve around a floating wall: a point that sits OUTSIDE the base
+    # lidar-wall soft zone (CENTER_PREF_RANGE) but INSIDE the aux-specific
+    # widened zone (AUX_CENTER_PREF_RANGE) must still carry nonzero A* cost --
+    # this is what makes A* start bending away from a floating panel sooner /
+    # give it more berth than an equivalent, precisely-mapped lidar wall.
+    aux_cost, _ = grid2.build_costmap()
+    qx, qy = ex + C.CENTER_PREF_RANGE + C.AUX_PREF_MARGIN_M / 2, ey
+    check("floating-wall (aux) soft zone extends past the base lidar-wall range",
+          C.AUX_CENTER_PREF_RANGE > C.CENTER_PREF_RANGE and
+          float(aux_cost[grid2.world_to_grid(qx, qy)]) > 0.0)
+
     # PERSISTENCE (the core fix): saturate confidence, then a CLEAR sight-line
     # (camera lost the wall in the < depth_min dead zone) must NOT erase it.
     for _ in range(int(C.AUX_HIT_CAP)):
@@ -331,6 +342,84 @@ def main():
         t += 0.1
     check("stuck watchdog fires on a position-frozen spin (no forward command needed)",
           spinning_was_caught and t <= C.STUCK_TIMEOUT_S + 0.15)
+
+    # ------------------------------------------------------- wheel-slip odometry gate
+    # Regression for the "map got drifted" symptom: wheels commanded forward
+    # into a wall report a translation delta identical to real motion. Without
+    # gating, that phantom delta gets composed into the belief pose, which
+    # fools _has_moved_enough() into re-running scan-match/integration against
+    # a pose that never actually moved -- smearing the map. _is_wheel_slip()
+    # must drop the translation (but NOT the IMU-sourced heading) whenever the
+    # robot is commanded into a wall it is already touching, and must NOT
+    # false-positive on ordinary open-space driving.
+    class _SlipProbe:
+        cur_v = 0.0
+        scan_body = np.empty((0, 2))
+    sprobe = _SlipProbe()
+    is_slip = M.NavigationController._is_wheel_slip.__get__(sprobe)
+
+    wall_ahead = np.array([[0.02, 0.0], [0.02, 0.05], [0.02, -0.05]])  # ~2cm in front
+    open_space = np.array([[2.0, 0.0], [2.0, 0.3], [2.0, -0.3]])       # 2m clear
+
+    sprobe.cur_v, sprobe.scan_body = 0.15, wall_ahead
+    check("driving forward into a touching wall is flagged as slip",
+          is_slip((0.02, 0.0, 0.0)))
+    sprobe.cur_v, sprobe.scan_body = 0.15, open_space
+    check("driving forward in open space is NOT flagged as slip",
+          not is_slip((0.02, 0.0, 0.0)))
+    sprobe.cur_v, sprobe.scan_body = 0.0, wall_ahead
+    check("standing still next to a wall is NOT flagged as slip (no commanded motion)",
+          not is_slip((0.0, 0.0, 0.0)))
+    sprobe.cur_v, sprobe.scan_body = -0.15, wall_ahead
+    check("reversing (wall is only ahead, not behind) is NOT flagged as slip",
+          not is_slip((0.02, 0.0, 0.0)))
+
+    # ------------------------------------------------- frontier-starvation escape
+    # Regression for a THIRD, worse deadlock seen on a moved-spawn Webots run:
+    # the stuck watchdog fires and RECOVERY runs, but if select_frontier_goal()
+    # never has anything to offer (e.g. a corner the fixed EXPL_MAX_RADIUS_M /
+    # anti-self-boxing disc doesn't cover from this spawn), RECOVERY just hands
+    # control back to the same starved EXPLORE state and the spin/recover cycle
+    # repeats forever. _explore() must escalate its own search radius and, past
+    # NO_FRONTIER_MAX_STRIKES, fall back to a reactive escape drive so the robot
+    # always eventually moves instead of spinning in place indefinitely.
+    class _ExploreProbe:
+        pose = (3.7, 0.9, 0.0)
+        path = []
+        goal_world = None
+        perception = None
+        go_fail_until = 0.0
+        no_frontier_until = 0.0
+        _no_frontier_strikes = 0
+        _escape_until = 0.0
+        scan_body = np.empty((0, 2))
+
+        def refresh_costmap(self, t, force=False):
+            pass
+
+        def select_frontier_goal(self):
+            return None, None  # simulate a permanently frontier-starved robot
+
+        def _last_plan_t(self):
+            return -1e9
+
+    eprobe = _ExploreProbe()
+    explore = M.NavigationController._explore.__get__(eprobe)
+    eprobe._try_go_to_target = M.NavigationController._try_go_to_target.__get__(eprobe)
+    eprobe._escape_drive = M.NavigationController._escape_drive.__get__(eprobe)
+    escaped = False
+    t = 0.0
+    budget = C.NO_FRONTIER_SPIN_S * C.NO_FRONTIER_MAX_STRIKES + C.ESCAPE_DRIVE_T + 2.0
+    while t < budget:
+        v, w = explore("yellow", "GO_YELLOW", t)
+        if v > 0.0:
+            escaped = True
+            break
+        t += 0.25
+    check("frontier starvation escalates strikes to the cap",
+          eprobe._no_frontier_strikes == C.NO_FRONTIER_MAX_STRIKES)
+    check("frontier starvation eventually triggers a reactive escape drive",
+          escaped)
 
     print()
     if _fails:

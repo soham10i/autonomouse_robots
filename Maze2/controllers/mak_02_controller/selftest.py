@@ -11,8 +11,10 @@ from __future__ import annotations
 import math
 import os
 import sys
+from typing import List, Tuple, Any
 
 import numpy as np
+import numpy.typing as npt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -25,24 +27,41 @@ from depth_model import DepthModel
 from mapping import LidarModel, OccupancyGrid
 from perception import Perception
 
-PASS, FAIL = "PASS", "FAIL"
-_fails = []
+PASS: str = "PASS"
+FAIL: str = "FAIL"
+_fails: List[str] = []
 
 
-def check(name, cond):
+def check(name: str, cond: bool) -> None:
+    """Logs the result of a condition check and records failures.
+
+    Args:
+        name (str): Description of the test.
+        cond (bool): Boolean outcome of the test condition.
+    """
     print(f"  [{PASS if cond else FAIL}] {name}")
     if not cond:
         _fails.append(name)
 
 
-def _room_ranges(lm, half=1.7, gap=(0.6, 1.2)):
-    out = []
+def _room_ranges(lm: LidarModel, half: float = 1.7, gap: Tuple[float, float] = (0.6, 1.2)) -> npt.NDArray[np.float32]:
+    """Generates synthetic lidar ranges representing a square room with a gap.
+
+    Args:
+        lm (LidarModel): Lidar projection model instance.
+        half (float, optional): Half width of the room in meters. Defaults to 1.7.
+        gap (Tuple[float, float], optional): Angular gap representing a door/corridor. Defaults to (0.6, 1.2).
+
+    Returns:
+        npt.NDArray[np.float32]: Array of simulated distance measurements.
+    """
+    out: List[float] = []
     for a in lm.angles:
         if gap[0] < a < gap[1]:
             out.append(11.5)
             continue
         c, s = math.cos(a), math.sin(a)
-        ts = []
+        ts: List[float] = []
         for n_, off in ((c, half), (c, -half), (s, half), (s, -half)):
             if abs(n_) > 1e-6:
                 t = off / n_
@@ -54,24 +73,25 @@ def _room_ranges(lm, half=1.7, gap=(0.6, 1.2)):
     return np.array(out, dtype=np.float32)
 
 
-def main():
+def main() -> None:
+    """Executes the full suite of pipeline tests and exits on failure."""
     print("mak_02 Maze2 selftest")
     lm = LidarModel(400, 2 * math.pi, 0.2, 12.0)
     grid = OccupancyGrid()
-    pose = (0.0, 0.0, 0.0)
+    pose: Tuple[float, float, float] = (0.0, 0.0, 0.0)
     for _ in range(4):
         r = _room_ranges(lm)
         pts, rr = lm.ranges_to_body(r)
         grid.integrate_scan(pose, pts, rr)
-    check("occupancy has walls", grid.occupied_mask().sum() > 100)
-    check("occupancy has free space", grid.free_mask().sum() > 500)
+    check("occupancy has walls", int(grid.occupied_mask().sum()) > 100)
+    check("occupancy has free space", int(grid.free_mask().sum()) > 500)
 
     corr, hit = grid.scan_match((0.05, -0.04, 0.0), pts)
     moved = math.hypot(corr[0], corr[1])
     check("scan-match correction is bounded", moved <= C.SM_LIN_HALF + 1e-6)
 
     # poison patch + costmap -- confidence-gated (self-correcting against drift)
-    pp = np.array([[0.5 + 0.02 * i, 0.02 * j] for i in range(-3, 4) for j in range(-3, 4)])
+    pp = np.array([[0.5 + 0.02 * i, 0.02 * j] for i in range(-3, 4) for j in range(-3, 4)], dtype=np.float64)
     grid.add_poison_points(pp)                       # one frame
     _, lethal1 = grid.build_costmap()
     check("single-frame poison is NOT yet lethal (drift-gated)",
@@ -79,10 +99,10 @@ def main():
     for _ in range(int(C.POISON_MIN_HITS)):          # confirm over consecutive frames
         grid.add_poison_points(pp)
     cost, lethal = grid.build_costmap()
-    check("confirmed poison created lethal cells", lethal.sum() > 0)
-    check("confirmed poison cell is lethal", lethal[grid.world_to_grid(0.5, 0.0)])
+    check("confirmed poison created lethal cells", int(lethal.sum()) > 0)
+    check("confirmed poison cell is lethal", bool(lethal[grid.world_to_grid(0.5, 0.0)]))
     # a one-off drift mark that is never re-seen must DECAY, not stick forever
-    grid.add_poison_points(np.array([[-0.5, 0.5]]))  # drift splash, seen once
+    grid.add_poison_points(np.array([[-0.5, 0.5]], dtype=np.float64))  # drift splash, seen once
     for _ in range(int(C.POISON_HIT_CAP)):           # later frames do NOT re-see it
         grid.add_poison_points(pp)
     _, lethal2 = grid.build_costmap()
@@ -107,12 +127,12 @@ def main():
     csx = np.arange(-1.25, 1.26, 0.02)
     for cxw in csx:
         for yw in (0.20, 0.22, 0.24, -0.20, -0.22, -0.24):
-            ix, iy = gc.world_to_grid(cxw, yw)
+            ix, iy = gc.world_to_grid(float(cxw), float(yw))
             if gc.in_bounds(ix, iy):
                 gc.L[ix, iy] = C.L_MAX
     for yw in np.arange(-0.24, 0.25, 0.02):
         for cxw in (-1.25, 1.25):
-            ix, iy = gc.world_to_grid(cxw, yw)
+            ix, iy = gc.world_to_grid(float(cxw), float(yw))
             if gc.in_bounds(ix, iy):
                 gc.L[ix, iy] = C.L_MAX
     cost_c, lethal_c = gc.build_costmap()
@@ -131,7 +151,7 @@ def main():
 
     # DWA: open space straight, smoothness bounded
     d = LP.DWAPlanner(0.032)
-    EMPTY = np.empty((0, 2))
+    EMPTY = np.empty((0, 2), dtype=np.float64)
     v = w = 0.0
     for _ in range(40):
         v, w = d.compute((0, 0, 0), (2.0, 0.0), EMPTY, EMPTY)
@@ -156,7 +176,7 @@ def main():
     res = dryrun.simulate("selftest-narrow", (0.0, 0.0, 0.0),
                           [(0.0, 0.0), (4.0, 0.0)], walls, max_ticks=900)
     check("closed-loop: robot drives a narrow corridor at speed (no crawl)",
-          res["reached"] and res["avg_speed"] > 0.15)
+          res["reached"] and float(res["avg_speed"]) > 0.15)
 
     # perception: blue pillar + green floor
     per = Perception(640, 480, 1.04)
@@ -165,10 +185,10 @@ def main():
     img[360:480, 250:400] = (0, 200, 0)       # green floor strip
     dets = per.update_pillars(img, None, (0.0, 0.0, 0.0))
     check("blue pillar detected", dets["blue"] is not None)
-    check("blue pillar world position set", per.pillar_world["blue"] is not None)
+    check("blue pillar world position set", per.pillar_world.get("blue") is not None)
     gw = per.green_floor_world(img, (0.0, 0.0, 0.0))
     check("green floor projected to world points", gw.shape[0] > 0)
-    check("green reflex fires on poison ahead", per.green_reflex(img))
+    check("green reflex fires on poison ahead", bool(per.green_reflex(img)))
 
     # ---------------------------------------------------- NEW for Maze4 ----
     # depth thin-scan: a low panel in front, height band correctly applied
@@ -178,7 +198,9 @@ def main():
     # row v maps to z_r = -(v-cy)/fy*depth + mount_z; solve for v at z_r=0.05 m.
     cy, fy = dm.cy, dm.fy
     rng = 0.5
-    v_for_z = lambda z: cy - (z - dm.mount_z) * fy / rng
+    def v_for_z(z: float) -> float:
+        return cy - (z - dm.mount_z) * fy / rng
+        
     v_lo, v_hi = sorted([int(v_for_z(C.AUX_Z_MIN + 0.01)), int(v_for_z(C.AUX_Z_MAX - 0.01))])
     depth_img[v_lo:v_hi, 30:50] = rng   # in-band low panel, columns 30-49
     bearings, hit_ranges, hit_mask, clear_mask = dm.thin_scan(depth_img)
@@ -205,12 +227,12 @@ def main():
 
     grid2 = OccupancyGrid()
     grid2.integrate_depth_obstacles((0.0, 0.0, 0.0), b1, r1, *HIT, depth_min=0.05)
-    check("single depth frame is NOT yet lethal aux (confidence-gated)", grid2.aux.sum() == 0)
+    check("single depth frame is NOT yet lethal aux (confidence-gated)", int(grid2.aux.sum()) == 0)
     grid2.integrate_depth_obstacles((0.0, 0.0, 0.0), b1, r1, *HIT, depth_min=0.05)
     check("a second consistent frame confirms the aux cell",
           bool(grid2.aux[grid2.world_to_grid(ex, ey)]))
     check("confirmed aux cell is lethal in the costmap",
-          grid2.build_costmap()[1][grid2.world_to_grid(ex, ey)])
+          bool(grid2.build_costmap()[1][grid2.world_to_grid(ex, ey)]))
 
     # PERSISTENCE (the core fix): saturate confidence, then a CLEAR sight-line
     # (camera lost the wall in the < depth_min dead zone) must NOT erase it.
@@ -243,7 +265,7 @@ def main():
     for _ in range(2):
         grid2b.integrate_depth_obstacles((0.0, 0.0, 0.0), b1, r1, *HIT, depth_min=0.05)
     grid2b.mark_free_disc(ex, ey, 0.2)
-    check("mark_free_disc also clears aux in the footprint", grid2b.aux.sum() == 0)
+    check("mark_free_disc also clears aux in the footprint", int(grid2b.aux.sum()) == 0)
 
     # lidar gate (anti-smear): a hit on a cell the LIDAR already maps must NOT
     # enter the aux layer; a hit in a lidar-BLIND spot is kept after confirmation.
@@ -253,12 +275,12 @@ def main():
     for _ in range(3):
         grid3.integrate_depth_obstacles((0.0, 0.0, 0.0), b1, r1, *HIT, depth_min=0.05)
     check("depth hit on an existing lidar wall is NOT duplicated into aux",
-          grid3.aux.sum() == 0)
+          int(grid3.aux.sum()) == 0)
     grid4 = OccupancyGrid()                       # no lidar wall anywhere
     for _ in range(2):
         grid4.integrate_depth_obstacles((0.0, 0.0, 0.0), b1, r1, *HIT, depth_min=0.05)
     check("depth hit in a lidar-blind spot is kept (real floating panel)",
-          grid4.aux.sum() == 1)
+          int(grid4.aux.sum()) == 1)
 
     # IR lookup-table inversion round-trips
     table = [0.0, 1000.0, 0.0, 0.5, 100.0, 0.0]   # inverse-linear: close=high val
@@ -298,8 +320,8 @@ def main():
         _progress_ref_t = 0.0
 
     probe = _StuckProbe()
-    probe._reset_progress = M.NavigationController._reset_progress.__get__(probe)
-    is_stuck = M.NavigationController._is_stuck.__get__(probe)
+    probe._reset_progress = M.NavigationController._reset_progress.__get__(probe)  # type: ignore
+    is_stuck = M.NavigationController._is_stuck.__get__(probe)  # type: ignore
     check("stuck watchdog: false before any reference is set", not is_stuck(0.0))
     t = 0.0
     spinning_was_caught = False

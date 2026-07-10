@@ -56,12 +56,14 @@ def _cluster(frontier):
     return clusters
 
 
-def find_frontiers(grid, lethal, robot_xy, start_xy):
+def find_frontiers(grid, lethal, robot_xy, start_xy, extra_radius=0.0):
     """Return a list of candidate dicts: ``{cell, world, size}`` (filtered).
 
     Filtered by minimum cluster size, a minimum distance from the robot, and a
     maximum radius from the start pose (so a gap in the boundary cannot lure the
-    robot off into the unbounded floor outside the maze).
+    robot off into the unbounded floor outside the maze). ``extra_radius`` widens
+    that cap temporarily (see ``config.EXPL_RADIUS_RELAX_*``) when the caller has
+    been unable to find any in-range frontier for a while.
     """
     frontier = detect_frontier_cells(grid, lethal)
     if not frontier.any():
@@ -83,7 +85,7 @@ def find_frontiers(grid, lethal, robot_xy, start_xy):
         wx, wy = grid.grid_to_world(cix, ciy)
         if math.hypot(wx - rx, wy - ry) < C.FRONTIER_MIN_DIST_M:
             continue
-        if math.hypot(wx - sx, wy - sy) > C.EXPL_MAX_RADIUS_M:
+        if math.hypot(wx - sx, wy - sy) > C.EXPL_MAX_RADIUS_M + extra_radius:
             continue
         out.append({"cell": (int(cix), int(ciy)), "world": (wx, wy), "size": len(comp)})
     return out

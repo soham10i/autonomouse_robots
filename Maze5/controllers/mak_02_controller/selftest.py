@@ -27,13 +27,30 @@ PASS, FAIL = "PASS", "FAIL"
 _fails = []
 
 
-def check(name, cond):
+def check(name: str, cond: bool) -> None:
+    """Evaluates a test condition and prints its result, appending to failures if false.
+
+    Args:
+        name (str): The description or name of the test check.
+        cond (bool): The boolean result of the condition being tested.
+    """
     print(f"  [{PASS if cond else FAIL}] {name}")
     if not cond:
         _fails.append(name)
 
 
-def _room_ranges(lm, half=1.7, gap=(0.6, 1.2)):
+def _room_ranges(lm: LidarModel, half: float = 1.7, gap: tuple[float, float] = (0.6, 1.2)) -> np.ndarray:
+    """Generates synthetic lidar ranges for a rectangular room with a gap.
+
+    Args:
+        lm (LidarModel): The lidar model instance used to compute angles.
+        half (float, optional): Half-width of the square room. Defaults to 1.7.
+        gap (tuple[float, float], optional): The angular range (min, max) in radians
+            where the room has an open gap (e.g., a doorway). Defaults to (0.6, 1.2).
+
+    Returns:
+        np.ndarray: An array of simulated range measurements.
+    """
     out = []
     for a in lm.angles:
         if gap[0] < a < gap[1]:
@@ -52,7 +69,13 @@ def _room_ranges(lm, half=1.7, gap=(0.6, 1.2)):
     return np.array(out, dtype=np.float32)
 
 
-def main():
+def main() -> None:
+    """Executes the selftest suite for the mak_02 navigation pipeline.
+
+    Exercises various components including mapping, scan-matching, A* path planning,
+    frontier exploration, and perception, asserting their correctness against
+    synthetic data. Exits with status 1 if any checks fail.
+    """
     print("mak_02 selftest")
     lm = LidarModel(400, 2 * math.pi, 0.2, 12.0)
     grid = OccupancyGrid()

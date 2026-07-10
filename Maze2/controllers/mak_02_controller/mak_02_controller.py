@@ -29,8 +29,10 @@ from __future__ import annotations
 
 import math
 import os
+from typing import Optional, List, Tuple, Dict, Any, Callable
 
 import numpy as np
+import numpy.typing as npt
 
 import config as C
 import astar
@@ -69,9 +71,23 @@ class NavigationController:
     :meth:`run`. All device access goes through :class:`RobotInterface`; every
     other collaborator consumes plain NumPy arrays and pose tuples, so the
     control logic stays simulator-agnostic and unit-testable.
+    
+    Attributes:
+        log: Configured logger for the controller.
+        outdir (str): Path to the output maps and logs directory.
+        events (RunEventLog): Telemetry event logger.
+        hardware (RobotInterface): Interface to physical/simulated robot hardware.
+        dt (float): The base control timestep duration in seconds.
+        lidar (Optional[LidarModel]): Lidar projection logic instance.
+        occupancy_grid (OccupancyGrid): The 2D mapping and costmap state.
+        odometry (Odometry): Tracks wheel and IMU odometry.
+        perception (Optional[Perception]): Evaluates visual obstacles/pillars.
+        depth_model (Optional[DepthModel]): Integrates depth camera point clouds.
+        local_planner (LP.DWAPlanner): Dynamic window approach local planner.
+        visualizer (Visualizer): Render engine for live tracking/snapshots.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         """Discover devices, build the pipeline, and open the run event log.
 
         Missing optional sensors (lidar/camera/depth) degrade gracefully with a
@@ -90,7 +106,7 @@ class NavigationController:
         specs = self.hardware.lidar_specs()
         if specs is not None:
             n_beams, fov, r_min, r_max = specs
-            self.lidar = LidarModel(n_beams, fov, r_min, r_max)
+            self.lidar: Optional[LidarModel] = LidarModel(n_beams, fov, r_min, r_max)
         else:
             self.lidar = None
             self.log.warning("no lidar found — mapping/DWA will be degraded")
@@ -100,7 +116,7 @@ class NavigationController:
 
         cam = self.hardware.camera_specs()
         if cam is not None:
-            self.perception = Perception(cam[0], cam[1], cam[2])
+            self.perception: Optional[Perception] = Perception(cam[0], cam[1], cam[2])
         else:
             self.perception = None
             self.log.warning("no camera found — pillar/poison perception disabled")
@@ -108,7 +124,7 @@ class NavigationController:
         dspecs = self.hardware.depth_specs()
         if dspecs is not None:
             dw, dh, dfov, dmin, dmax = dspecs
-            self.depth_model = DepthModel(dw, dh, dfov, depth_min=dmin, depth_max=dmax)
+            self.depth_model: Optional[DepthModel] = DepthModel(dw, dh, dfov, depth_min=dmin, depth_max=dmax)
         else:
             self.depth_model = None
             self.log.warning("no depth camera found — low floating panels rely "
@@ -118,56 +134,56 @@ class NavigationController:
         self.visualizer = Visualizer(self.occupancy_grid)
 
         # pose belief (odom frame; absolute world frame is unknown w/o supervisor)
-        self.pose = (0.0, 0.0, 0.0)
-        self._last_raw = None
-        self.start_xy = (0.0, 0.0)
+        self.pose: Tuple[float, float, float] = (0.0, 0.0, 0.0)
+        self._last_raw: Optional[Tuple[float, float, float]] = None
+        self.start_xy: Tuple[float, float] = (0.0, 0.0)
 
         # mapping bookkeeping
-        self.scan_body = np.empty((0, 2))
-        self.scan_ranges = np.empty((0,))
-        self._pose_at_last_integrate = None
-        self.cost = None
-        self.lethal = None
-        self._last_costmap_t = -1e9
+        self.scan_body: npt.NDArray[np.float64] = np.empty((0, 2))
+        self.scan_ranges: npt.NDArray[np.float64] = np.empty((0,))
+        self._pose_at_last_integrate: Optional[Tuple[float, float, float]] = None
+        self.cost: Optional[npt.NDArray[np.float64]] = None
+        self.lethal: Optional[npt.NDArray[np.bool_]] = None
+        self._last_costmap_t: float = -1e9
 
         # mission state
-        self.state = MissionState.INIT_SCAN
-        self.spin_accum = 0.0
-        self._prev_theta_for_spin = None
-        self.path = []                 # current global path (world points)
-        self.goal_world = None
-        self.carrot = None
-        self.frontier_mask = None
-        self.blacklist = []            # failed frontier goals (world)
-        self.go_fail_until = 0.0
-        self.no_frontier_until = 0.0
-        self.cur_v = 0.0
+        self.state: str = MissionState.INIT_SCAN
+        self.spin_accum: float = 0.0
+        self._prev_theta_for_spin: Optional[float] = None
+        self.path: List[Tuple[float, float]] = []                 # current global path (world points)
+        self.goal_world: Optional[Tuple[float, float]] = None
+        self.carrot: Optional[Tuple[float, float]] = None
+        self.frontier_mask: Optional[npt.NDArray[np.bool_]] = None
+        self.blacklist: List[Tuple[float, float]] = []            # failed frontier goals (world)
+        self.go_fail_until: float = 0.0
+        self.no_frontier_until: float = 0.0
+        self.cur_v: float = 0.0
 
         # stuck / recovery
-        self._progress_ref = None
-        self._progress_ref_t = 0.0
-        self._frozen_ref = None
-        self._frozen_t = 0.0
-        self.recovery_phase = None
-        self.recovery_t0 = 0.0
-        self.recovery_return = MissionState.EXPLORE_BLUE
-        self.recovery_chain = 0
+        self._progress_ref: Optional[Tuple[float, float]] = None
+        self._progress_ref_t: float = 0.0
+        self._frozen_ref: Optional[Tuple[float, float, float]] = None
+        self._frozen_t: float = 0.0
+        self.recovery_phase: Optional[str] = None
+        self.recovery_t0: float = 0.0
+        self.recovery_return: str = MissionState.EXPLORE_BLUE
+        self.recovery_chain: int = 0
 
         # timing table
-        self.t_start = None
-        self.t_blue = None
-        self.t_yellow = None
+        self.t_start: Optional[float] = None
+        self.t_blue: Optional[float] = None
+        self.t_yellow: Optional[float] = None
 
-        self.tick = 0
-        self._last_snapshot_t = -1e9
-        self.green_block = False
-        self._green_streak = 0       # consecutive frames the imminent-green reflex fired
-        self.ir_block = False
+        self.tick: int = 0
+        self._last_snapshot_t: float = -1e9
+        self.green_block: bool = False
+        self._green_streak: int = 0       # consecutive frames the imminent-green reflex fired
+        self.ir_block: bool = False
 
     # ===================================================================== #
     #  Sensing & localisation
     # ===================================================================== #
-    def update_sensing(self):
+    def update_sensing(self) -> None:
         """Read wheel/IMU/lidar and advance the pose belief by one increment."""
         wl, wr = self.hardware.read_encoders()
         yaw = self.hardware.read_yaw()
@@ -186,7 +202,7 @@ class NavigationController:
             if ranges is not None:
                 self.scan_body, self.scan_ranges = self.lidar.ranges_to_body(ranges)
 
-    def _has_moved_enough(self):
+    def _has_moved_enough(self) -> bool:
         """True once the robot has moved/turned enough to re-integrate a scan."""
         if self._pose_at_last_integrate is None:
             return True
@@ -194,18 +210,21 @@ class NavigationController:
         return (math.hypot(dx, dy) > C.SM_MIN_TRAVEL_M or
                 abs(dth) > C.SM_MIN_TURN_RAD)
 
-    def run_slam_step(self):
+    def run_slam_step(self) -> None:
         """Scan-match the latest lidar cloud against the map, then integrate it."""
         if self.scan_body.shape[0] == 0 or not self._has_moved_enough():
             return
         if C.SM_ENABLED:
             corrected, hit = self.occupancy_grid.scan_match(self.pose, self.scan_body)
             self.pose = corrected
-        self.occupancy_grid.integrate_scan(self.pose, self.scan_body, self.scan_ranges)
+        # clear the footprint BEFORE integrating: the clamp states "no obstacle can
+        # be here, the robot is", which is only true of the pose as of this instant.
+        # Running it afterwards let it wipe walls the very scan had just confirmed.
         self.occupancy_grid.mark_free_disc(self.pose[0], self.pose[1], C.ROBOT_RADIUS * 0.8)
+        self.occupancy_grid.integrate_scan(self.pose, self.scan_body, self.scan_ranges)
         self._pose_at_last_integrate = self.pose
 
-    def update_perception(self):
+    def update_perception(self) -> None:
         """Detect pillars and the green poison floor from the RGB(-D) camera."""
         if self.perception is None:
             return
@@ -223,7 +242,7 @@ class NavigationController:
             self._green_streak = 0
         self.green_block = self._green_streak >= C.GREEN_REFLEX_CONFIRM_FRAMES
 
-    def _update_depth_aux(self):
+    def _update_depth_aux(self) -> None:
         """Update the PERSISTENT depth-obstacle (aux) layer from the depth image.
 
         Dense in-band hits (the full floating-wall footprint) reinforce a
@@ -242,7 +261,7 @@ class NavigationController:
         self.occupancy_grid.integrate_depth_obstacles(self.pose, bearings, hit_ranges,
                                             hit_mask, clear_mask, self.depth_model.depth_min)
 
-    def _update_ir_bumper(self):
+    def _update_ir_bumper(self) -> None:
         """Close-range chassis-IR hard-stop, independent of mapping (last resort
         for the lowest panel, WallShort(15), which sits below where the depth
         camera reliably resolves at very close range)."""
@@ -259,8 +278,13 @@ class NavigationController:
     # ===================================================================== #
     #  Planning
     # ===================================================================== #
-    def refresh_costmap(self, t, force=False):
-        """Rebuild the A* costmap when it is stale (or when ``force`` is set)."""
+    def refresh_costmap(self, t: float, force: bool = False) -> None:
+        """Rebuild the A* costmap when it is stale (or when ``force`` is set).
+        
+        Args:
+            t (float): Current simulation time in seconds.
+            force (bool, optional): If True, rebuilds costmap regardless of staleness. Defaults to False.
+        """
         if force or self.cost is None or (t - self._last_costmap_t) >= C.REPLAN_PERIOD_S:
             self.cost, self.lethal = self.occupancy_grid.build_costmap()
             # ---- anti-self-boxing: the robot IS here, so clear its disc ----
@@ -281,9 +305,16 @@ class NavigationController:
             np.minimum(sub, C.COST_OBS_WEIGHT * 0.5, out=sub)  # capped, not free
             self._last_costmap_t = t
 
-    def plan_path_to(self, goal_world):
-        """Plan a simplified A* world-space path to the goal; ``None`` if unreachable."""
-        if self.cost is None:
+    def plan_path_to(self, goal_world: Tuple[float, float]) -> Optional[List[Tuple[float, float]]]:
+        """Plan a simplified A* world-space path to the goal; ``None`` if unreachable.
+        
+        Args:
+            goal_world (Tuple[float, float]): The requested (x, y) target coordinate.
+            
+        Returns:
+            Optional[List[Tuple[float, float]]]: Polyline path coordinates, or None.
+        """
+        if self.cost is None or self.lethal is None:
             return None
         start = self.occupancy_grid.world_to_grid(self.pose[0], self.pose[1])
         goal = self.occupancy_grid.world_to_grid(goal_world[0], goal_world[1])
@@ -293,15 +324,22 @@ class NavigationController:
         cells = astar.simplify(cells, self.lethal, self.cost)
         return [self.occupancy_grid.grid_to_world(ix, iy) for (ix, iy) in cells]
 
-    def _is_blacklisted(self, wxy):
+    def _is_blacklisted(self, wxy: Tuple[float, float]) -> bool:
         """True if the world point is near a previously-abandoned (unreachable) goal."""
         for bx, by in self.blacklist:
             if math.hypot(wxy[0] - bx, wxy[1] - by) < C.FRONTIER_BLACKLIST_R:
                 return True
         return False
 
-    def select_frontier_goal(self):
-        """Pick the best reachable frontier; return (path, goal_world) or (None,None)."""
+    def select_frontier_goal(self) -> Tuple[Optional[List[Tuple[float, float]]], Optional[Tuple[float, float]]]:
+        """Pick the best reachable frontier; return (path, goal_world) or (None,None).
+        
+        Returns:
+            Tuple[Optional[List[Tuple[float, float]]], Optional[Tuple[float, float]]]:
+                The path to follow and its terminal goal point, if any.
+        """
+        if self.lethal is None:
+            return None, None
         self.frontier_mask = FR.detect_frontier_cells(self.occupancy_grid, self.lethal)
         cands = FR.find_frontiers(self.occupancy_grid, self.lethal, self.pose[:2], self.start_xy)
         cands = [c for c in cands if not self._is_blacklisted(c["world"])]
@@ -324,7 +362,7 @@ class NavigationController:
         return best[1], best[2]
 
     @staticmethod
-    def _path_length(path):
+    def _path_length(path: List[Tuple[float, float]]) -> float:
         """Total Euclidean length of a world-space polyline path."""
         return sum(math.hypot(path[i + 1][0] - path[i][0], path[i + 1][1] - path[i][1])
                    for i in range(len(path) - 1))
@@ -332,11 +370,14 @@ class NavigationController:
     # ===================================================================== #
     #  Driving
     # ===================================================================== #
-    def _mapped_obstacles_body(self):
+    def _mapped_obstacles_body(self) -> npt.NDArray[np.float64]:
         """Mapped poison + aux (low-panel) points near the robot, body frame.
 
         Folded into one array for the DWA local planner — both are static,
         mapped obstacle sources the live lidar can't (always) see directly.
+        
+        Returns:
+            npt.NDArray[np.float64]: Plottable obstacle points transformed to body frame.
         """
         near_r = C.DWA_SLOWDOWN_DIST + 0.4
         pw = self.occupancy_grid.poison_points_near(self.pose[0], self.pose[1], near_r)
@@ -347,13 +388,24 @@ class NavigationController:
         world = np.concatenate(parts, axis=0)
         return inverse_transform_points(world, self.pose[0], self.pose[1], self.pose[2])
 
-    def drive_along_path(self, path, v_cap=None):
-        """Carrot + DWA toward the end of ``path``; returns (v, w, near_goal)."""
+    def drive_along_path(self, path: List[Tuple[float, float]], v_cap: Optional[float] = None) -> Tuple[float, float, bool]:
+        """Carrot + DWA toward the end of ``path``; returns (v, w, near_goal).
+        
+        Args:
+            path (List[Tuple[float, float]]): The A* path to traverse.
+            v_cap (Optional[float], optional): Top forward speed limit. Defaults to None.
+            
+        Returns:
+            Tuple[float, float, bool]: Suggested (v, w) velocity and flag for if goal is near.
+        """
         if not path:
             return 0.0, 0.0, True
         carrot, near_goal = LP.choose_carrot(path, self.pose, self.cur_v)
         self.carrot = carrot
         extra_b = self._mapped_obstacles_body()
+        if carrot is None:
+            return 0.0, 0.0, True
+            
         v, w = self.local_planner.compute(self.pose, carrot, self.scan_body, extra_b,
                                 green_block=self.green_block, v_cap=v_cap)
         return v, w, near_goal
@@ -361,12 +413,12 @@ class NavigationController:
     # ===================================================================== #
     #  Stuck detection & recovery
     # ===================================================================== #
-    def _reset_progress(self, t):
+    def _reset_progress(self, t: float) -> None:
         """Reset the stuck-watchdog reference to the current pose and time."""
         self._progress_ref = (self.pose[0], self.pose[1])
         self._progress_ref_t = t
 
-    def _is_stuck(self, t):
+    def _is_stuck(self, t: float) -> bool:
         """Pure POSITION watchdog: no translation for STUCK_TIMEOUT_S in a
         driving state means stuck, regardless of what is currently commanded.
 
@@ -391,7 +443,7 @@ class NavigationController:
             return False
         return (t - self._progress_ref_t) > C.STUCK_TIMEOUT_S
 
-    def _is_frozen(self, t):
+    def _is_frozen(self, t: float) -> bool:
         """Backstop: True if NEITHER position NOR heading has changed for too long
         in a driving state (catches any v=0,w=0 deadlock the stuck-check misses
         because it requires forward command)."""
@@ -406,7 +458,7 @@ class NavigationController:
             return False
         return (t - self._frozen_t) > C.FROZEN_TIMEOUT_S
 
-    def _enter_recovery(self, t, return_state):
+    def _enter_recovery(self, t: float, return_state: str) -> None:
         """Enter the RECOVERY state, choosing reverse-then-spin or spin-only."""
         self.recovery_return = return_state
         self.state = MissionState.RECOVERY
@@ -425,7 +477,7 @@ class NavigationController:
                           phase=self.recovery_phase, rear_clear=round(rear, 3),
                           chain=self.recovery_chain)
 
-    def _run_recovery(self, t):
+    def _run_recovery(self, t: float) -> Tuple[float, float]:
         """Execute the reverse-then-spin recovery manoeuvre; return ``(v, w)``."""
         if self.recovery_phase == "reverse":
             if (t - self.recovery_t0) < C.RECOVERY_REVERSE_T and \
@@ -450,7 +502,7 @@ class NavigationController:
     # ===================================================================== #
     #  MissionState state machine
     # ===================================================================== #
-    def _try_go_to_target(self, target, go_state, t):
+    def _try_go_to_target(self, target: str, go_state: str, t: float) -> bool:
         """Switch EXPLORE->GO iff the pillar is known AND an A* path exists now."""
         pw = self.perception.pillar_world.get(target) if self.perception else None
         if pw is None or t < self.go_fail_until:
@@ -475,7 +527,7 @@ class NavigationController:
                           pillar_world=[round(pw[0], 3), round(pw[1], 3)])
         return True
 
-    def _explore(self, target, go_state, t):
+    def _explore(self, target: str, go_state: str, t: float) -> Tuple[float, float]:
         """Explore toward the target: commit to it if seen, else pick a frontier."""
         if self._try_go_to_target(target, go_state, t):
             return self.drive_along_path(self.path)[:2]
@@ -501,11 +553,11 @@ class NavigationController:
         v, w, _ = self.drive_along_path(self.path)
         return v, w
 
-    def _last_plan_t(self):
+    def _last_plan_t(self) -> float:
         """Simulation time of the most recent successful plan (or ``-inf``)."""
-        return getattr(self, "_plan_stamp", -1e9)
+        return float(getattr(self, "_plan_stamp", -1e9))
 
-    def _go(self, target, next_state, t, reached_cb):
+    def _go(self, target: str, next_state: str, t: float, reached_cb: Callable[[float], None]) -> Tuple[float, float]:
         """Drive to a known pillar; on arrival fire the callback and advance the FSM."""
         pw = self.perception.pillar_world.get(target) if self.perception else None
         if pw is None:
@@ -544,25 +596,25 @@ class NavigationController:
         v, w, near = self.drive_along_path(self.path, v_cap=C.V_CRUISE)
         return v, w
 
-    def _on_blue_reached(self, t):
+    def _on_blue_reached(self, t: float) -> None:
         """Record the BLUE-pillar arrival time and emit a milestone event."""
         self.t_blue = t
         self.log.info("BLUE pillar reached at t=%.2fs (start->blue = %.2fs)",
-                      t, t - self.t_start)
+                      t, t - (self.t_start or 0.0))
         self.events.event("pillar_reached", sim_time=t, tick=self.tick,
                           state=self.state, pillar="blue",
-                          split_s=round(t - self.t_start, 2))
+                          split_s=round(t - (self.t_start or 0.0), 2))
 
-    def _on_yellow_reached(self, t):
+    def _on_yellow_reached(self, t: float) -> None:
         """Record the YELLOW-pillar arrival time and emit a milestone event."""
         self.t_yellow = t
         self.log.info("YELLOW pillar reached at t=%.2fs (blue->yellow = %.2fs)",
-                      t, t - self.t_blue)
+                      t, t - (self.t_blue or 0.0))
         self.events.event("pillar_reached", sim_time=t, tick=self.tick,
                           state=self.state, pillar="yellow",
-                          split_s=round(t - self.t_blue, 2))
+                          split_s=round(t - (self.t_blue or 0.0), 2))
 
-    def step_mission(self, t):
+    def step_mission(self, t: float) -> Tuple[float, float]:
         """Advance the mission FSM by one tick and return the ``(v, w)`` command."""
         st = self.state
         if st == MissionState.INIT_SCAN:
@@ -595,7 +647,7 @@ class NavigationController:
     # ===================================================================== #
     #  Visualisation / output
     # ===================================================================== #
-    def _visualize(self, t, force=False):
+    def _visualize(self, t: float, force: bool = False) -> None:
         """Render the live map/costmap/path overlay and periodically snapshot it."""
         snap = force or (t - self._last_snapshot_t) >= C.SNAPSHOT_PERIOD_S
         # render live at ~10 Hz (every 3rd tick); always render when snapping
@@ -610,9 +662,9 @@ class NavigationController:
             self.visualizer.save(img, os.path.join(self.outdir, "live_map.png"))
             self._last_snapshot_t = t
 
-    def _log_timing(self):
+    def _log_timing(self) -> None:
         """Print the start->blue->yellow timing table and log it as an event."""
-        start_to_blue = (self.t_blue - self.t_start) if self.t_blue is not None else None
+        start_to_blue = (self.t_blue - self.t_start) if self.t_blue is not None and self.t_start is not None else None
         blue_to_yellow = (self.t_yellow - self.t_blue
                           if (self.t_yellow is not None and self.t_blue is not None)
                           else None)
@@ -627,7 +679,7 @@ class NavigationController:
                           blue_to_yellow_s=round(blue_to_yellow, 2) if blue_to_yellow is not None else None,
                           total_s=round(total, 2) if total is not None else None)
 
-    def finalize(self):
+    def finalize(self) -> None:
         """Stop the robot and write the final map, timing table, and telemetry."""
         self.hardware.stop()
         self.hardware.step()
@@ -652,7 +704,7 @@ class NavigationController:
     # ===================================================================== #
     #  Main loop
     # ===================================================================== #
-    def run(self):
+    def run(self) -> None:
         """Run the full sense-plan-act loop until the mission ends or 'Q' is hit.
 
         Each pipeline stage is isolated by :func:`guarded_stage`: an unexpected
@@ -699,9 +751,14 @@ class NavigationController:
                 self._update_ir_bumper()
             with guarded_stage("costmap", self.log, self.events, **ctx):
                 self.refresh_costmap(t)
-                # keep the robot's own cell plannable in the costmap snapshot
+                # keep the robot's own cell plannable in the costmap snapshot.
+                # aux-only: aux is re-reinforced every frame so a per-tick clear is
+                # cheap to undo, but L is rebuilt solely by integrate_scan (gated on
+                # SM_MIN_TRAVEL_M), so clamping L here erased walls faster than any
+                # scan could restore them.
                 self.occupancy_grid.mark_free_disc(self.pose[0], self.pose[1],
-                                                   C.ROBOT_RADIUS * 0.8)
+                                                   C.ROBOT_RADIUS * 0.8,
+                                                   clear_lidar=False)
 
             v, w = 0.0, 0.0
             with guarded_stage("mission", self.log, self.events, **ctx):
@@ -738,7 +795,7 @@ class NavigationController:
 
         self.finalize()
 
-    def _log_status(self, t):
+    def _log_status(self, t: float) -> None:
         """Emit a periodic one-line status summary (console + a JSONL heartbeat)."""
         occ = int(self.occupancy_grid.occupied_mask().sum())
         pois = int(self.occupancy_grid.poison.sum())
@@ -759,7 +816,7 @@ class NavigationController:
                           green_block=self.green_block, ir_block=self.ir_block)
 
 
-def main():
+def main() -> None:
     """Construct and run the controller, guaranteeing the robot is stopped.
 
     Any exception that escapes the per-stage fault barriers is logged with a

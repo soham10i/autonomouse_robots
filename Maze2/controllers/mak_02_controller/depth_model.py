@@ -23,6 +23,7 @@ the optical axis in metres.
 from __future__ import annotations
 
 import math
+from typing import Optional, Tuple
 
 import numpy as np
 
@@ -31,22 +32,39 @@ import config as C
 
 class DepthModel:
     """Projects a depth image into a body-frame thin-scan of low-panel obstacle hits inside the robot's collision height band."""
-    def __init__(self, width, height, fov, mount_z=None, depth_min=0.05, depth_max=10.0):
-        self.w = int(width)
-        self.h = int(height)
-        self.fov = float(fov)
-        self.fx = 0.5 * self.w / math.tan(0.5 * self.fov)
-        self.fy = self.fx
-        self.cx = 0.5 * self.w
-        self.cy = 0.5 * self.h
-        self.mount_z = C.CAMERA_MOUNT_Z if mount_z is None else mount_z
-        self.depth_min = depth_min
-        self.depth_max = depth_max
-        self._u = np.arange(self.w, dtype=np.float32).reshape(1, -1)
-        self._v = np.arange(self.h, dtype=np.float32).reshape(-1, 1)
+    def __init__(self, width: int, height: int, fov: float, mount_z: Optional[float] = None, depth_min: float = 0.05, depth_max: float = 10.0) -> None:
+        """Initializes the depth model with camera intrinsic parameters.
 
-    def to_robot_frame(self, depth):
-        """Return ``(x_r, y_r, z_r)`` arrays (H, W) in the robot frame."""
+        Args:
+            width (int): The width of the depth image in pixels.
+            height (int): The height of the depth image in pixels.
+            fov (float): The horizontal field of view in radians.
+            mount_z (Optional[float], optional): The camera mount height in meters. Defaults to `config.CAMERA_MOUNT_Z`.
+            depth_min (float, optional): Minimum valid depth in meters. Defaults to 0.05.
+            depth_max (float, optional): Maximum valid depth in meters. Defaults to 10.0.
+        """
+        self.w: int = int(width)
+        self.h: int = int(height)
+        self.fov: float = float(fov)
+        self.fx: float = 0.5 * self.w / math.tan(0.5 * self.fov)
+        self.fy: float = self.fx
+        self.cx: float = 0.5 * self.w
+        self.cy: float = 0.5 * self.h
+        self.mount_z: float = C.CAMERA_MOUNT_Z if mount_z is None else mount_z
+        self.depth_min: float = depth_min
+        self.depth_max: float = depth_max
+        self._u: np.ndarray = np.arange(self.w, dtype=np.float32).reshape(1, -1)
+        self._v: np.ndarray = np.arange(self.h, dtype=np.float32).reshape(-1, 1)
+
+    def to_robot_frame(self, depth: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Projects the depth image into the robot's body frame coordinates.
+
+        Args:
+            depth (np.ndarray): The raw depth image array of shape (H, W).
+
+        Returns:
+            Tuple[np.ndarray, np.ndarray, np.ndarray]: Three arrays `(x_r, y_r, z_r)`, each of shape (H, W), representing the 3D coordinates in the robot frame.
+        """
         depth = np.asarray(depth, dtype=np.float32).reshape(self.h, self.w)
         with np.errstate(invalid="ignore"):
             x_r = depth
@@ -54,19 +72,20 @@ class DepthModel:
             z_r = -(self._v - self.cy) * depth / self.fy + self.mount_z
         return x_r, y_r, z_r
 
-    def thin_scan(self, depth):
-        """Per-column nearest in-band obstacle, AND clear-sight-line info.
+    def thin_scan(self, depth: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+        """Extracts a single-line obstacle scan from the depth image for the robot's collision band.
 
-        Returns ``(bearings, hit_ranges, hit_mask, clear_mask)`` -- all length
-        ``w`` (one entry per image column):
-          * ``hit_mask[i]``   True  -> an in-band obstacle was found; its range
-            is ``hit_ranges[i]`` and its bearing is ``bearings[i]``.
-          * ``clear_mask[i]`` True  -> the sight-line along that column is
-            clear of in-band obstacles out to ``AUX_MAX_RANGE`` (i.e. every
-            valid depth pixel in that column is either out of range or outside
-            the collision height band) -> safe to raytrace-clear aux there.
-          A column can be neither (e.g. all readings invalid/NaN) -- callers
-          should skip those rather than treat them as a clear or a hit.
+        Evaluates per-column nearest in-band obstacle and clear sight-line info.
+
+        Args:
+            depth (np.ndarray): The raw depth image array of shape (H, W).
+
+        Returns:
+            Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]: Four arrays of length W:
+                - `bearings` (np.ndarray): The horizontal bearing of each column in the robot frame.
+                - `hit_ranges` (np.ndarray): The distance to the nearest in-band obstacle per column, or 0.0 if none.
+                - `hit_mask` (np.ndarray): Boolean mask indicating if an in-band obstacle was found.
+                - `clear_mask` (np.ndarray): Boolean mask indicating if the column is clear of in-band obstacles out to `AUX_MAX_RANGE`.
         """
         depth = np.asarray(depth, dtype=np.float32).reshape(self.h, self.w)
         _, _, z_r = self.to_robot_frame(depth)
@@ -80,11 +99,6 @@ class DepthModel:
         hit_mask = np.isfinite(col_min)
         hit_ranges = np.where(hit_mask, col_min, 0.0).astype(np.float64)
 
-        # A column is "clear" if it has SOME real signal (not all NaN/garbage)
-        # and no in-band candidate landed within AUX_MAX_RANGE.  A column whose
-        # nearest valid reading is itself beyond AUX_MAX_RANGE (e.g. a far wall)
-        # still proves the near zone is obstacle-free, so it counts as clear --
-        # it must NOT require that reading to itself be within range.
         any_valid = finite.any(axis=0)
         clear_mask = any_valid & ~hit_mask
 

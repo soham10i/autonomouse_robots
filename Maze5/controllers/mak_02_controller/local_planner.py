@@ -1,13 +1,14 @@
-"""Local control: pure-pursuit carrot + DWA driver on LIVE lidar.
+"""Local navigation algorithms: Pure Pursuit and Dynamic Window Approach (DWA).
 
-Pure pursuit only chooses *where* to aim (a carrot point on the global A* path).
-The DWA layer decides *how* to get there using the live lidar scan, so it stays
-clear of walls and centres itself in corridors even if the global map has drift.
-All obstacle geometry is handled in the robot BODY frame.
+Provides reactive path-following logic. Pure Pursuit translates a global polyline
+path into a short-range "carrot" target. The DWA layer samples kinematic rollouts
+against raw Lidar data to select the optimal safe velocity vector, ensuring
+collision avoidance independent of potential SLAM drift.
 """
 from __future__ import annotations
 
 import math
+from typing import Optional
 
 import numpy as np
 
@@ -18,19 +19,27 @@ from geometry import inverse_transform_points, wrap_angle
 # --------------------------------------------------------------------------- #
 #  Pure pursuit — pick the carrot on the path
 # --------------------------------------------------------------------------- #
-def choose_carrot(path_world, pose, v_cur):
-    """Return the look-ahead point (wx, wy) on ``path_world`` and a goal flag.
+def choose_carrot(
+    path_world: list[tuple[float, float]],
+    pose: tuple[float, float, float],
+    v_cur: float,
+) -> tuple[Optional[tuple[float, float]], bool]:
+    """Computes a look-ahead target point on the global path.
 
-    Arc-length pure pursuit: project the robot onto the path POLYLINE (nearest
-    point on the nearest *segment*, not the nearest vertex), then walk ``look``
-    metres forward ALONG the path from that projection and interpolate the
-    carrot there. The earlier "first vertex >= look away, starting from the
-    closest vertex" shortcut aims BACKWARD once the robot passes the start of
-    a line-of-sight-simplified straight segment (A* collapses an open run to
-    just [start, goal], so the start vertex stays closest while sitting >=
-    look behind the robot -> the carrot snaps back and the robot pivots
-    around). Projecting along the segment guarantees the carrot is always
-    ahead of the robot's progress.
+    Utilizes arc-length pure pursuit: the robot's current pose is projected onto
+    the nearest path segment, and a target point is interpolated a dynamic
+    distance forward along the polyline. The lookahead distance scales linearly
+    with current velocity.
+
+    Args:
+        path_world (list[tuple[float, float]]): The A* path as a sequence of `(x, y)` world coordinates.
+        pose (tuple[float, float, float]): Current robot pose `(x, y, theta)`.
+        v_cur (float): Current forward linear velocity in m/s.
+
+    Returns:
+        tuple[Optional[tuple[float, float]], bool]: A tuple `(carrot_point, near_goal)`.
+            `carrot_point` is the `(wx, wy)` coordinate of the target, or None if the path is empty.
+            `near_goal` is True if the final destination is within the lookahead horizon.
     """
     if not path_world:
         return None, True
@@ -87,13 +96,38 @@ def choose_carrot(path_world, pose, v_cur):
 #  DWA local planner
 # --------------------------------------------------------------------------- #
 class DWAPlanner:
-    """Dynamic-Window-Approach local planner: samples feasible (v, w) rollouts against the live obstacle cloud and returns the best safe command toward the carrot."""
-    def __init__(self, ctrl_dt=0.032):
+    """Dynamic-Window-Approach local planner.
+
+    Samples feasible (v, w) kinematic rollouts against the live obstacle cloud.
+    Scores candidates based on clearance, goal heading alignment, and forward
+    progress to return the optimal safe control command.
+
+    Attributes:
+        prev_v (float): The previously issued linear velocity command (m/s).
+        prev_w (float): The previously issued angular velocity command (rad/s).
+        ctrl_dt (float): The fundamental control loop period (Webots timestep) in seconds.
+    """
+
+    def __init__(self, ctrl_dt: float = 0.032) -> None:
+        """Initializes the DWA Planner with zeroed state.
+
+        Args:
+            ctrl_dt (float, optional): Control loop timestep in seconds. Defaults to 0.032.
+        """
         self.prev_v = 0.0
         self.prev_w = 0.0
         self.ctrl_dt = ctrl_dt   # real time between commands (Webots timestep)
 
-    def _obstacles_body(self, lidar_body, poison_body):
+    def _obstacles_body(self, lidar_body: Optional[np.ndarray], poison_body: Optional[np.ndarray]) -> np.ndarray:
+        """Concatenates lidar points and poison map points into a single obstacle array.
+
+        Args:
+            lidar_body (Optional[np.ndarray]): Lidar hits in body frame `(N, 2)`.
+            poison_body (Optional[np.ndarray]): Poison zone boundaries in body frame `(M, 2)`.
+
+        Returns:
+            np.ndarray: Combined array of obstacle points `(K, 2)`.
+        """
         parts = []
         if lidar_body is not None and lidar_body.shape[0] > 0:
             pts = lidar_body
@@ -107,17 +141,31 @@ class DWAPlanner:
             return np.empty((0, 2))
         return np.concatenate(parts, axis=0)
 
-    def _nearest_dist(self, obs):
+    def _nearest_dist(self, obs: np.ndarray) -> float:
+        """Finds the Euclidean distance to the nearest obstacle.
+
+        Args:
+            obs (np.ndarray): Obstacle point cloud `(N, 2)`.
+
+        Returns:
+            float: Distance to the closest point in meters, or infinity if empty.
+        """
         if obs.shape[0] == 0:
             return float("inf")
         return float(np.min(np.hypot(obs[:, 0], obs[:, 1])))
 
-    def _side_clearance(self, obs, long_window=0.30):
-        """Nearest lateral obstacle alongside the robot (|x| < window), or inf.
+    def _side_clearance(self, obs: np.ndarray, long_window: float = 0.30) -> float:
+        """Calculates the lateral clearance to the nearest side wall.
 
-        Drives the single tight-gap speed factor: in a genuinely narrow passage
-        the robot eases off for precise centring. Unlike the deleted compounding
-        caps this is ONE floored factor, active only below DWA_TIGHT_GAP_DIST.
+        Identifies obstacles physically beside the robot to apply narrow-gap
+        speed reductions.
+
+        Args:
+            obs (np.ndarray): Obstacle point cloud `(N, 2)`.
+            long_window (float, optional): Longitudinal distance threshold defining "beside". Defaults to 0.30.
+
+        Returns:
+            float: The minimum lateral (Y-axis) distance in meters, or infinity.
         """
         if obs.shape[0] == 0:
             return float("inf")
@@ -126,15 +174,33 @@ class DWAPlanner:
             return float("inf")
         return float(np.min(np.abs(obs[beside, 1])))
 
-    def compute(self, pose, carrot_world, lidar_body, poison_body,
-                green_block=False, allow_reverse=False, v_cap=None):
-        """Return a smooth (v, w) command toward the carrot.
+    def compute(
+        self,
+        pose: tuple[float, float, float],
+        carrot_world: tuple[float, float],
+        lidar_body: Optional[np.ndarray],
+        poison_body: Optional[np.ndarray],
+        green_block: bool = False,
+        allow_reverse: bool = False,
+        v_cap: Optional[float] = None,
+    ) -> tuple[float, float]:
+        """Calculates the optimal local motion command to reach the carrot point.
 
-        Candidate (v, w) pairs span the FULL feasible window (trajectory-rollout
-        / move_base-style local planner).  Trajectories that pass within
-        ``DWA_SAFE_RADIUS`` of any live-lidar or mapped-poison point are rejected;
-        the best survivor is then rate-limited against the previous command using
-        the real control period for jerk-free, smooth motion.
+        Samples `(v, w)` pairs, rolls out trajectories assuming constant velocity,
+        rejects paths colliding with `lidar_body` or `poison_body`, and scores
+        the remainder. The chosen command is rate-limited by dynamic constraints.
+
+        Args:
+            pose (tuple[float, float, float]): Current robot pose `(x, y, theta)`.
+            carrot_world (tuple[float, float]): The pursuit target `(wx, wy)`.
+            lidar_body (Optional[np.ndarray]): Live Lidar obstacles in body frame `(N, 2)`.
+            poison_body (Optional[np.ndarray]): Mapped poison boundaries in body frame `(M, 2)`.
+            green_block (bool, optional): If True, halts all forward motion. Defaults to False.
+            allow_reverse (bool, optional): If True, includes reverse velocity samples. Defaults to False.
+            v_cap (Optional[float], optional): Hard upper limit on linear velocity. Defaults to None.
+
+        Returns:
+            tuple[float, float]: The bounded velocity command `(v, w)` in m/s and rad/s.
         """
         obs = self._obstacles_body(lidar_body, poison_body)
         carrot_b = inverse_transform_points(
@@ -240,15 +306,24 @@ class DWAPlanner:
         self.prev_v, self.prev_w = v_cmd, w_cmd
         return v_cmd, w_cmd
 
-    def reset(self):
+    def reset(self) -> None:
+        """Clears the internal velocity state to allow instantaneous stops."""
         self.prev_v = self.prev_w = 0.0
 
 
 # --------------------------------------------------------------------------- #
 #  Reactive helpers for recovery
 # --------------------------------------------------------------------------- #
-def rear_clearance(lidar_body, half_width=0.18):
-    """Min distance to an obstacle in the rear cone (x < 0), or inf."""
+def rear_clearance(lidar_body: Optional[np.ndarray], half_width: float = 0.18) -> float:
+    """Determines the minimum obstacle distance in the robot's rear cone.
+
+    Args:
+        lidar_body (Optional[np.ndarray]): Lidar hits in body frame `(N, 2)`.
+        half_width (float, optional): The lateral corridor width to check. Defaults to 0.18.
+
+    Returns:
+        float: Minimum distance in meters behind the robot, or infinity if clear.
+    """
     if lidar_body is None or lidar_body.shape[0] == 0:
         return float("inf")
     behind = (lidar_body[:, 0] < -0.02) & (np.abs(lidar_body[:, 1]) < half_width)
@@ -258,8 +333,17 @@ def rear_clearance(lidar_body, half_width=0.18):
     return float(np.min(np.hypot(p[:, 0], p[:, 1])))
 
 
-def freer_side(lidar_body):
-    """+1 if the left half-plane has more room than the right, else -1."""
+def freer_side(lidar_body: Optional[np.ndarray]) -> float:
+    """Determines which lateral hemisphere has fewer proximal obstacles.
+
+    Used during recovery to decide the optimal in-place rotation direction.
+
+    Args:
+        lidar_body (Optional[np.ndarray]): Lidar hits in body frame `(N, 2)`.
+
+    Returns:
+        float: `1.0` if the left side is clearer, `-1.0` if the right side is clearer.
+    """
     if lidar_body is None or lidar_body.shape[0] == 0:
         return 1.0
     left = lidar_body[lidar_body[:, 1] > 0]
@@ -269,8 +353,19 @@ def freer_side(lidar_body):
     return 1.0 if dl >= dr else -1.0
 
 
-def front_clearance(lidar_body, half_width=0.16):
-    """Min distance to an obstacle straight ahead (x > 0 cone), or inf."""
+def front_clearance(lidar_body: Optional[np.ndarray], half_width: float = 0.16) -> float:
+    """Determines the minimum obstacle distance straight ahead of the robot.
+
+    Used by the state machine to aggressively halt progress if an obstacle
+    (like a pillar) is physically imminent.
+
+    Args:
+        lidar_body (Optional[np.ndarray]): Lidar hits in body frame `(N, 2)`.
+        half_width (float, optional): The lateral corridor width to check. Defaults to 0.16.
+
+    Returns:
+        float: Minimum straight-ahead distance in meters, or infinity if clear.
+    """
     if lidar_body is None or lidar_body.shape[0] == 0:
         return float("inf")
     ahead = (lidar_body[:, 0] > 0.0) & (np.abs(lidar_body[:, 1]) < half_width)

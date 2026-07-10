@@ -19,11 +19,12 @@ behaviour to preserve.
 from __future__ import annotations
 
 import math
+from typing import Any, List, Optional, Tuple, Union
 
 import numpy as np
 
 import config as C
-from geometry import transform_points, wrap_angle
+from geometry import transform_points, wrap_angle, wrap_angle_arr
 
 
 # --------------------------------------------------------------------------- #
@@ -33,21 +34,45 @@ class LidarModel:
     """Beam ``i`` points at ``theta_i = fov/2 - i*fov/(N-1)`` (Webots convention).
 
     The lidar sits on the robot's z-axis, so its x/y frame == the body frame.
+    
+    Attributes:
+        n (int): Number of lidar beams.
+        fov (float): Field of view in radians.
+        r_min (float): Minimum valid range in meters.
+        r_max (float): Maximum valid range in meters.
+        angles (np.ndarray): Bearing angle for each beam.
     """
 
-    def __init__(self, n_beams, fov, r_min=None, r_max=None):
-        self.n = int(n_beams)
-        self.fov = float(fov)
-        self.r_min = C.LIDAR_RANGE_MIN if r_min is None else max(r_min, C.LIDAR_RANGE_MIN)
-        self.r_max = C.LIDAR_RANGE_MAX if r_max is None else min(r_max, 30.0)
+    def __init__(self, n_beams: int, fov: float, r_min: Optional[float] = None, r_max: Optional[float] = None) -> None:
+        """Initializes the LidarModel with sensor parameters.
+
+        Args:
+            n_beams (int): Number of lidar beams.
+            fov (float): Field of view in radians.
+            r_min (Optional[float], optional): Minimum valid range. Defaults to `config.LIDAR_RANGE_MIN`.
+            r_max (Optional[float], optional): Maximum valid range. Defaults to `config.LIDAR_RANGE_MAX` (capped at 30.0).
+        """
+        self.n: int = int(n_beams)
+        self.fov: float = float(fov)
+        self.r_min: float = C.LIDAR_RANGE_MIN if r_min is None else max(r_min, C.LIDAR_RANGE_MIN)
+        self.r_max: float = C.LIDAR_RANGE_MAX if r_max is None else min(r_max, 30.0)
         start = self.fov * 0.5
         step = self.fov / max(self.n - 1, 1)
-        self.angles = start - step * np.arange(self.n)
-        self._cos = np.cos(self.angles)
-        self._sin = np.sin(self.angles)
+        self.angles: np.ndarray = start - step * np.arange(self.n)
+        self._cos: np.ndarray = np.cos(self.angles)
+        self._sin: np.ndarray = np.sin(self.angles)
 
-    def ranges_to_body(self, ranges):
-        """Return ``(pts_body (M,2), ranges_valid (M,))`` for in-range beams."""
+    def ranges_to_body(self, ranges: Union[np.ndarray, List[float]]) -> Tuple[np.ndarray, np.ndarray]:
+        """Convert raw ranges to body-frame Cartesian coordinates.
+
+        Args:
+            ranges (Union[np.ndarray, List[float]]): Array of range measurements.
+
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: A tuple containing:
+                - `pts_body` (np.ndarray): Shape (M, 2) array of (x, y) coordinates for valid beams.
+                - `ranges_valid` (np.ndarray): Shape (M,) array of valid ranges.
+        """
         ranges = np.asarray(ranges, dtype=np.float64)
         if ranges.size != self.n:
             return np.empty((0, 2)), np.empty((0,))
@@ -61,7 +86,15 @@ class LidarModel:
 # --------------------------------------------------------------------------- #
 #  8-connected dilation helpers (used for inflation + scan-match field)
 # --------------------------------------------------------------------------- #
-def _dilate8(mask):
+def _dilate8(mask: np.ndarray) -> np.ndarray:
+    """Performs 8-connected dilation on a boolean mask.
+
+    Args:
+        mask (np.ndarray): A 2D boolean numpy array.
+
+    Returns:
+        np.ndarray: The dilated mask.
+    """
     out = mask.copy()
     out[1:, :] |= mask[:-1, :]
     out[:-1, :] |= mask[1:, :]
@@ -74,8 +107,16 @@ def _dilate8(mask):
     return out
 
 
-def _distance_bands(mask, max_band):
-    """Approx. distance (in cells, Chebyshev) from each cell to nearest True."""
+def _distance_bands(mask: np.ndarray, max_band: int) -> np.ndarray:
+    """Computes approximate distance (in cells, Chebyshev) from each cell to the nearest True pixel.
+
+    Args:
+        mask (np.ndarray): Boolean mask representing occupied space.
+        max_band (int): Maximum distance to compute before capping.
+
+    Returns:
+        np.ndarray: A 2D integer array of distances.
+    """
     dist = np.full(mask.shape, max_band + 1, dtype=np.int16)
     cur = mask.copy()
     if not cur.any():
@@ -96,47 +137,99 @@ def _distance_bands(mask, max_band):
 #  Occupancy grid
 # --------------------------------------------------------------------------- #
 class OccupancyGrid:
-    """2-D log-odds occupancy map with poison/auxiliary obstacle layers, costmap construction and lidar scan-matching."""
-    def __init__(self):
-        self.res = C.GRID_RESOLUTION
-        self.n = C.GRID_CELLS
+    """2-D log-odds occupancy map with poison/auxiliary obstacle layers, costmap construction and lidar scan-matching.
+    
+    Attributes:
+        res (float): Map resolution (meters/cell).
+        n (int): Map dimension in cells (n x n grid).
+        ox (float): X origin in world coordinates.
+        oy (float): Y origin in world coordinates.
+        L (np.ndarray): Log-odds grid (Float32).
+        poison (np.ndarray): Boolean lethal poison mask.
+        poison_hits (np.ndarray): Float32 confidence grid for poison.
+        aux (np.ndarray): Boolean depth-camera auxiliary obstacle layer.
+        aux_hits (np.ndarray): Float32 confidence grid for auxiliary obstacles.
+    """
+    def __init__(self) -> None:
+        """Initializes the empty occupancy grid layers."""
+        self.res: float = C.GRID_RESOLUTION
+        self.n: int = C.GRID_CELLS
+        self.ox: float
+        self.oy: float
         self.ox, self.oy = C.GRID_ORIGIN
-        self.L = np.zeros((self.n, self.n), dtype=np.float32)
-        self.poison = np.zeros((self.n, self.n), dtype=bool)
+        self.L: np.ndarray = np.zeros((self.n, self.n), dtype=np.float32)
+        self.poison: np.ndarray = np.zeros((self.n, self.n), dtype=bool)
         # per-cell poison confidence (see add_poison_points): a cell is lethal
         # poison only once its confidence reaches C.POISON_MIN_HITS, so transient
         # projection-drift splashes decay away instead of sticking forever.
-        self.poison_hits = np.zeros((self.n, self.n), dtype=np.float32)
+        self.poison_hits: np.ndarray = np.zeros((self.n, self.n), dtype=np.float32)
         # depth-camera auxiliary obstacle layer (NEW for Maze4) -- see module
         # docstring: boolean only, no counters, cleared by raytrace every tick.
-        self.aux = np.zeros((self.n, self.n), dtype=bool)
+        self.aux: np.ndarray = np.zeros((self.n, self.n), dtype=bool)
         # per-cell depth-obstacle CONFIDENCE (see integrate_depth_obstacles): the
         # boolean `aux` above is just `aux_hits >= C.AUX_MIN_HITS`.  Confidence
         # persists across the depth blind zone so floating walls are not forgotten
         # the instant the robot gets too close to see them.
-        self.aux_hits = np.zeros((self.n, self.n), dtype=np.float32)
+        self.aux_hits: np.ndarray = np.zeros((self.n, self.n), dtype=np.float32)
 
     # ----------------------------------------------------- coordinate maths
-    def world_to_grid(self, wx, wy):
+    def world_to_grid(self, wx: float, wy: float) -> Tuple[int, int]:
+        """Convert a world coordinate to grid indices.
+
+        Args:
+            wx (float): World X coordinate.
+            wy (float): World Y coordinate.
+
+        Returns:
+            Tuple[int, int]: (ix, iy) cell indices.
+        """
         ix = int((wx - self.ox) / self.res)
         iy = int((wy - self.oy) / self.res)
         return ix, iy
 
-    def world_to_grid_arr(self, wx, wy):
+    def world_to_grid_arr(self, wx: Union[float, np.ndarray], wy: Union[float, np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
+        """Convert array of world coordinates to grid indices.
+
+        Args:
+            wx (Union[float, np.ndarray]): World X coordinates.
+            wy (Union[float, np.ndarray]): World Y coordinates.
+
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: (ix, iy) cell indices.
+        """
         ix = ((np.asarray(wx) - self.ox) / self.res).astype(np.int32)
         iy = ((np.asarray(wy) - self.oy) / self.res).astype(np.int32)
         return ix, iy
 
-    def grid_to_world(self, ix, iy):
+    def grid_to_world(self, ix: int, iy: int) -> Tuple[float, float]:
+        """Convert grid indices to world coordinates (cell centre).
+
+        Args:
+            ix (int): Grid column index.
+            iy (int): Grid row index.
+
+        Returns:
+            Tuple[float, float]: (wx, wy) world coordinates in meters.
+        """
         return (self.ox + (ix + 0.5) * self.res, self.oy + (iy + 0.5) * self.res)
 
-    def in_bounds(self, ix, iy):
+    def in_bounds(self, ix: int, iy: int) -> bool:
+        """Check if grid indices are within the map bounds.
+
+        Args:
+            ix (int): Grid column index.
+            iy (int): Grid row index.
+
+        Returns:
+            bool: True if inside bounds, False otherwise.
+        """
         return 0 <= ix < self.n and 0 <= iy < self.n
 
-    def _inb_arr(self, ix, iy):
+    def _inb_arr(self, ix: np.ndarray, iy: np.ndarray) -> np.ndarray:
+        """Vectorized bounds check."""
         return (ix >= 0) & (ix < self.n) & (iy >= 0) & (iy < self.n)
 
-    def _ray_cells(self, pose, bearing_body, r0, r1):
+    def _ray_cells(self, pose: Tuple[float, float, float], bearing_body: float, r0: float, r1: float) -> np.ndarray:
         """Flat cell indices along a body-frame bearing from r0 to r1 (world)."""
         if r1 <= r0:
             return np.empty((0,), dtype=np.int64)
@@ -152,13 +245,56 @@ class OccupancyGrid:
         return (ixs[ok].astype(np.int64) * self.n + iys[ok].astype(np.int64))
 
     # ----------------------------------------------------------- integration
-    def integrate_scan(self, pose, pts_body, ranges):
-        """Ray-trace free space and stamp occupied endpoints from one scan."""
+    def _grazing_mask(self, pts_body: np.ndarray, ranges: np.ndarray) -> np.ndarray:
+        """True for beams that strike a surface too obliquely to trust their free ray.
+
+        On a straight surface ``r(theta) = d / cos(theta - theta0)``, so
+        ``|dr/dtheta| = r * tan(incidence)`` with incidence measured from the
+        surface normal.  Comparing the measured slope against
+        ``r * tan(LIDAR_GRAZE_MAX_DEG)`` therefore classifies each beam without
+        ever needing the surface itself.
+
+        Each beam is scored by the SMALLER of its two neighbouring slopes: at a
+        depth discontinuity (a doorway edge, a pillar rim) one side is huge while
+        the other still lies on the continuous surface, and it is that side which
+        describes the geometry the beam actually grazed.  Beams with no continuous
+        neighbour at all (isolated returns, speckle) score ``inf`` and are gated
+        out, which is the conservative choice.
+
+        Endpoint stamping is unaffected -- only the free ray is suppressed.
+
+        Args:
+            pts_body (np.ndarray): Shape (M, 2) beam endpoints in the body frame.
+            ranges (np.ndarray): Shape (M,) range per beam, index-aligned to pts_body.
+
+        Returns:
+            np.ndarray: Shape (M,) boolean mask, True where the beam is grazing.
+        """
+        m = ranges.shape[0]
+        if m < 3:
+            return np.zeros(m, dtype=bool)
+        bear = np.arctan2(pts_body[:, 1], pts_body[:, 0])
+        dth = np.abs(wrap_angle_arr(np.diff(bear)))
+        dr = np.abs(np.diff(ranges))
+        slope = dr / np.maximum(dth, 1e-9)          # |dr/dtheta| across each gap
+        inf = np.array([np.inf])
+        s = np.minimum(np.concatenate([inf, slope]), np.concatenate([slope, inf]))
+        return s > ranges * math.tan(math.radians(C.LIDAR_GRAZE_MAX_DEG))
+
+    def integrate_scan(self, pose: Tuple[float, float, float], pts_body: np.ndarray, ranges: np.ndarray) -> None:
+        """Ray-trace free space and stamp occupied endpoints from one scan.
+
+        Args:
+            pose (Tuple[float, float, float]): Current robot pose (x, y, yaw).
+            pts_body (np.ndarray): Obstacle hit points in body frame.
+            ranges (np.ndarray): Range values for each hit point.
+        """
         if pts_body.shape[0] == 0:
             return
         x, y, th = pose
         pts_world = transform_points(pts_body, x, y, th)
         rix, riy = self.world_to_grid(x, y)
+        grazing = self._grazing_mask(pts_body, ranges)
 
         free_lin = []
         occ_lin = []
@@ -166,7 +302,7 @@ class OccupancyGrid:
         for k in range(pts_world.shape[0]):
             ex, ey = pts_world[k, 0], pts_world[k, 1]
             rng = ranges[k]
-            steps = int(rng / self.res)
+            steps = 0 if grazing[k] else int(rng / self.res)
             if steps > 1:
                 ts = np.arange(steps) / float(steps)  # 0..(steps-1)/steps, excl. endpoint
                 fx = x + (ex - x) * ts
@@ -181,15 +317,23 @@ class OccupancyGrid:
                     occ_lin.append(eix * n_cells + eiy)
 
         Lflat = self.L.reshape(-1)
+        o = np.unique(np.asarray(occ_lin, dtype=np.int64)) if occ_lin else np.empty((0,), dtype=np.int64)
         if free_lin:
             f = np.unique(np.concatenate(free_lin))
-            np.add.at(Lflat, f, C.L_FREE)
-        if occ_lin:
-            o = np.unique(np.asarray(occ_lin, dtype=np.int64))
+            # A beam's last free sample sits ~1 cell short of its endpoint, so a
+            # near-diagonal beam routinely free-marks a cell that another beam of
+            # the SAME scan stamps occupied.  Occupied evidence wins: without this
+            # subtraction a wall cell nets only L_OCC+L_FREE per scan and hovers a
+            # single grazing ray above L_OCC_THRESH.
+            if o.size:
+                f = f[~np.isin(f, o)]
+            if f.size:
+                np.add.at(Lflat, f, C.L_FREE)
+        if o.size:
             np.add.at(Lflat, o, C.L_OCC)
         np.clip(self.L, C.L_MIN, C.L_MAX, out=self.L)
 
-    def integrate_depth_obstacles(self, pose, bearings, hit_ranges, hit_mask, clear_mask, depth_min):
+    def integrate_depth_obstacles(self, pose: Tuple[float, float, float], bearings: np.ndarray, hit_ranges: np.ndarray, hit_mask: np.ndarray, clear_mask: np.ndarray, depth_min: float) -> None:
         """Persistent, lidar-gated depth-obstacle layer (the floating-wall fix).
 
         Replaces the old per-tick raytrace-clear ``integrate_aux``.  Marking is
@@ -216,6 +360,14 @@ class OccupancyGrid:
            full-height walls (already lidar-mapped) out of the aux layer.
         4. **THRESHOLD** -- ``self.aux = aux_hits >= C.AUX_MIN_HITS`` (capped at
            ``C.AUX_HIT_CAP`` so a confirmed wall rides out stray clear frames).
+           
+        Args:
+            pose (Tuple[float, float, float]): Robot pose (x, y, yaw).
+            bearings (np.ndarray): Angles in robot body frame for each depth column.
+            hit_ranges (np.ndarray): Detected distances for each column.
+            hit_mask (np.ndarray): Boolean mask of which columns hit an obstacle.
+            clear_mask (np.ndarray): Boolean mask of clear columns.
+            depth_min (float): Minimum range of the depth camera to protect the blind shell.
         """
         hits = self.aux_hits
         hflat = hits.reshape(-1)
@@ -272,8 +424,8 @@ class OccupancyGrid:
         # --- step 4: boolean lethal layer
         self.aux = hits >= C.AUX_MIN_HITS
 
-    def mark_free_disc(self, wx, wy, radius):
-        """Force a small disc around a known-free point to a free log-odds.
+    def mark_free_disc(self, wx: float, wy: float, radius: float, *, clear_lidar: bool = True) -> None:
+        """Force a true disc around a known-free point to a free log-odds.
 
         ALSO clears the aux layer in that disc: the robot is physically there,
         so that ground truth overrides any stale aux mark.  This directly
@@ -281,6 +433,23 @@ class OccupancyGrid:
         marks it could never erase by standing in/spinning through them.  Never
         touches the poison layer (poison is a real hazard regardless of the
         robot's current position).
+
+        The clamp is confined to a RADIAL mask.  Writing the whole ``ceil``ed
+        bounding box instead (the original form) reached ``r*res*sqrt(2)`` =
+        0.177 m for a 0.102 m request -- past the 0.128 m footprint and past the
+        planner's 0.12 m lethal band -- so a single call hard-erased saturated
+        wall cells the robot was merely driving beside.  That, not the log-odds
+        integration, is what made the map fade along the robot's own track.
+
+        Args:
+            wx (float): World X coordinate.
+            wy (float): World Y coordinate.
+            radius (float): Clearing radius in meters.
+            clear_lidar (bool): When False, only the aux layer is cleared and the
+                lidar log-odds ``L`` is left untouched.  Callers that run every
+                control tick must use False: ``L`` is only ever rebuilt by
+                ``integrate_scan``, which is gated behind a minimum travel, so a
+                per-tick clamp on ``L`` erases far more than it restores.
         """
         cix, ciy = self.world_to_grid(wx, wy)
         r = int(math.ceil(radius / self.res))
@@ -288,12 +457,18 @@ class OccupancyGrid:
         y0, y1 = max(0, ciy - r), min(self.n, ciy + r + 1)
         if x0 >= x1 or y0 >= y1:
             return
-        sub = self.L[x0:x1, y0:y1]
-        np.minimum(sub, C.L_FREE_THRESH - 0.1, out=sub)
-        self.aux[x0:x1, y0:y1] = False
-        self.aux_hits[x0:x1, y0:y1] = 0.0   # reset confidence where the robot has driven
+        gx = np.arange(x0, x1)[:, None] - cix
+        gy = np.arange(y0, y1)[None, :] - ciy
+        disc = (gx * gx + gy * gy) * (self.res * self.res) <= radius * radius
+        if clear_lidar:
+            sub = self.L[x0:x1, y0:y1]
+            np.minimum(sub, C.L_FREE_THRESH - 0.1, out=sub, where=disc)
+        aux_sub = self.aux[x0:x1, y0:y1]
+        aux_sub[disc] = False
+        hits_sub = self.aux_hits[x0:x1, y0:y1]
+        hits_sub[disc] = 0.0   # reset confidence where the robot has driven
 
-    def add_poison_points(self, pts_world):
+    def add_poison_points(self, pts_world: np.ndarray) -> None:
         """Confidence-gated poison stamping (self-correcting against drift).
 
         Call ONCE per perception frame with the green floor points projected this
@@ -305,6 +480,9 @@ class OccupancyGrid:
         climbs to lethal and then to ``C.POISON_HIT_CAP`` (sticky); a one-off
         projection-drift mark peaks below the threshold and fades within a couple
         of frames, instead of smearing the map as the old write-only bitmap did.
+        
+        Args:
+            pts_world (np.ndarray): Shape (M, 2) array of poison points in the world frame.
         """
         hits = self.poison_hits
         # 1) decay transient (not-yet-confirmed) confidence everywhere
@@ -323,25 +501,47 @@ class OccupancyGrid:
         self.poison = hits >= C.POISON_MIN_HITS
 
     # --------------------------------------------------------------- masks
-    def occupied_mask(self):
+    def occupied_mask(self) -> np.ndarray:
+        """Returns boolean mask of lidar-occupied cells."""
         return self.L > C.L_OCC_THRESH
 
-    def free_mask(self):
+    def free_mask(self) -> np.ndarray:
+        """Returns boolean mask of known-free cells."""
         return self.L < C.L_FREE_THRESH
 
-    def unknown_mask(self):
+    def unknown_mask(self) -> np.ndarray:
+        """Returns boolean mask of unobserved cells."""
         return (~self.occupied_mask()) & (~self.free_mask())
 
     # ------------------------------------------------- mapped obstacles query
-    def poison_points_near(self, wx, wy, radius):
-        """World (M,2) of poison-cell centres within ``radius`` of (wx,wy)."""
+    def poison_points_near(self, wx: float, wy: float, radius: float) -> np.ndarray:
+        """World (M,2) of poison-cell centres within ``radius`` of (wx,wy).
+
+        Args:
+            wx (float): Search centre X in world coords.
+            wy (float): Search centre Y in world coords.
+            radius (float): Search radius in meters.
+
+        Returns:
+            np.ndarray: Array of (x, y) coordinates of poison cells.
+        """
         return self._mask_points_near(self.poison, wx, wy, radius)
 
-    def aux_points_near(self, wx, wy, radius):
-        """World (M,2) of aux-occupied cell centres within ``radius`` of (wx,wy)."""
+    def aux_points_near(self, wx: float, wy: float, radius: float) -> np.ndarray:
+        """World (M,2) of aux-occupied cell centres within ``radius`` of (wx,wy).
+        
+        Args:
+            wx (float): Search centre X in world coords.
+            wy (float): Search centre Y in world coords.
+            radius (float): Search radius in meters.
+
+        Returns:
+            np.ndarray: Array of (x, y) coordinates of auxiliary obstacle cells.
+        """
         return self._mask_points_near(self.aux, wx, wy, radius)
 
-    def _mask_points_near(self, mask, wx, wy, radius):
+    def _mask_points_near(self, mask: np.ndarray, wx: float, wy: float, radius: float) -> np.ndarray:
+        """Extracts world coordinates of mask true pixels within radius."""
         if not mask.any():
             return np.empty((0, 2))
         cix, ciy = self.world_to_grid(wx, wy)
@@ -356,17 +556,29 @@ class OccupancyGrid:
         wy_ = self.oy + (y0 + ly + 0.5) * self.res
         return np.stack([wx_, wy_], axis=1)
 
-    def is_poison_world(self, wx, wy):
+    def is_poison_world(self, wx: float, wy: float) -> bool:
+        """Check if a world coordinate lands in a poison cell.
+        
+        Args:
+            wx (float): World X coordinate.
+            wy (float): World Y coordinate.
+
+        Returns:
+            bool: True if poison, False otherwise.
+        """
         ix, iy = self.world_to_grid(wx, wy)
         return self.in_bounds(ix, iy) and bool(self.poison[ix, iy])
 
     # ------------------------------------------------------------ scan match
-    def _score_field(self):
+    def _score_field(self) -> np.ndarray:
         """Float field for scan matching: occupied=1, 1-ring=0.6, 2-ring=0.3.
 
         Deliberately lidar-only (does NOT include aux): the depth-aux layer is
         noisier and only used for collision avoidance / costmap, never for
         localisation, so it cannot corrupt the scan-matched pose.
+        
+        Returns:
+            np.ndarray: Score field grid.
         """
         occ = self.occupied_mask()
         field = np.zeros((self.n, self.n), dtype=np.float32)
@@ -377,11 +589,18 @@ class OccupancyGrid:
         field[d2] = 0.3
         return field
 
-    def scan_match(self, pred_pose, pts_body):
+    def scan_match(self, pred_pose: Tuple[float, float, float], pts_body: np.ndarray) -> Tuple[Tuple[float, float, float], float]:
         """Correlative (x,y,yaw) correction of ``pred_pose`` against the map.
 
         Returns ``(corrected_pose, hit_fraction)``.  Falls back to ``pred_pose``
         when too few beams land on mapped walls (avoids corrupting a good odom).
+
+        Args:
+            pred_pose (Tuple[float, float, float]): Dead-reckoning predicted pose.
+            pts_body (np.ndarray): Current lidar hit points in body frame.
+
+        Returns:
+            Tuple[Tuple[float, float, float], float]: The corrected pose and matching fraction [0.0, 1.0].
         """
         m = pts_body.shape[0]
         if m == 0 or not self.occupied_mask().any():
@@ -413,15 +632,19 @@ class OccupancyGrid:
                         continue
                     sc = field[ix[ok], iy[ok]].sum()
                     if sc > best[0]:
-                        best = (sc, dx, dy, dth)
+                        best = (sc, dx, dy, dth)  # type: ignore
         score, dx, dy, dth = best
-        hit_frac = score / max(m, 1)
+        # denominator must be the SCORED beam count, not the full cloud: `score`
+        # sums over `pts` (capped at SM_MAX_BEAMS), so dividing by `m` caps
+        # hit_frac at SM_MAX_BEAMS/m and silently rejects good matches whenever
+        # the lidar has more beams than SM_MAX_BEAMS.
+        hit_frac = score / max(pts.shape[0], 1)
         if hit_frac < C.SM_MIN_HIT_FRAC:
             return pred_pose, hit_frac
         return (px + dx, py + dy, wrap_angle(pth + dth)), hit_frac
 
     # -------------------------------------------------------------- costmap
-    def build_costmap(self):
+    def build_costmap(self) -> Tuple[np.ndarray, np.ndarray]:
         """Return ``(cost float32, lethal bool)`` over the whole grid.
 
         ``cost`` is additive A* penalty per cell (0 in open free space).  Unknown
@@ -430,6 +653,9 @@ class OccupancyGrid:
         (depth-derived low-obstacle) cells are folded into the SAME hard/soft
         obstacle bands as lidar-occupied cells -- both represent "a wall", aux
         is just the one the lidar plane missed.
+        
+        Returns:
+            Tuple[np.ndarray, np.ndarray]: The cost field and lethal mask.
         """
         occ = self.occupied_mask() | self.aux
         res = self.res

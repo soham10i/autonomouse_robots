@@ -506,19 +506,28 @@ class OccupancyGrid:
 
         ``cost`` is additive A* penalty per cell (0 in open free space).  Unknown
         cells are traversable (optimistic) so frontier goals stay reachable; the
-        live-lidar DWA layer guarantees real wall clearance regardless.  Aux
-        (depth-derived low-obstacle) cells are folded into the SAME hard/soft
-        obstacle bands as lidar-occupied cells -- both represent "a wall", aux
-        is just the one the lidar plane missed.
+        live-lidar DWA layer guarantees real wall clearance regardless.
+
+        Aux (depth-derived floating-wall) cells get their OWN, WIDER hard/soft
+        bands (C.AUX_HARD_OBS_DIST / C.AUX_CENTER_PREF_RANGE) instead of being
+        folded into the lidar-wall bands: aux confidence is sparser (2-frame
+        confirm) and less precisely localised than a lidar-mapped wall, so A*
+        should start curving away from it sooner and keep more clearance,
+        rather than threading it as tightly as a solid, precisely-mapped wall.
+        The two obstacle sources are combined by taking the lethal UNION and,
+        in the shared soft zone, the MAX of their two cost contributions.
         """
-        occ = self.occupied_mask() | self.aux
         res = self.res
+        occ_lidar = self.occupied_mask()
+        occ_aux = self.aux
 
         hard_b = max(1, int(round(C.HARD_OBS_DIST / res)))
         pref_b = max(hard_b + 1, int(round(C.CENTER_PREF_RANGE / res)))
-        d_obs = _distance_bands(occ, pref_b + 1)
+        aux_hard_b = max(hard_b, int(round(C.AUX_HARD_OBS_DIST / res)))
+        aux_pref_b = max(aux_hard_b + 1, int(round(C.AUX_CENTER_PREF_RANGE / res)))
 
-        lethal = d_obs <= hard_b
+        d_lidar = _distance_bands(occ_lidar, pref_b + 1)
+        lethal = d_lidar <= hard_b
         cost = np.zeros((self.n, self.n), dtype=np.float32)
         # center-seeking gradient: cost falls off with clearance out to pref_b so
         # A* rides the medial axis (maximum clearance) of every corridor rather
@@ -526,9 +535,16 @@ class OccupancyGrid:
         # to the absolute centre of the tight 0.39 m gaps.  (Replaces the old
         # fixed-width soft halo, which went flat in the middle of a narrow gap
         # and so gave A* no reason to prefer dead-centre.)
-        grad_zone = (d_obs > hard_b) & (d_obs <= pref_b)
-        frac = (pref_b - d_obs.astype(np.float32)) / max(1, (pref_b - hard_b))
+        grad_zone = (d_lidar > hard_b) & (d_lidar <= pref_b)
+        frac = (pref_b - d_lidar.astype(np.float32)) / max(1, (pref_b - hard_b))
         cost[grad_zone] += C.COST_OBS_WEIGHT * frac[grad_zone]
+
+        if occ_aux.any():
+            d_aux = _distance_bands(occ_aux, aux_pref_b + 1)
+            lethal |= d_aux <= aux_hard_b
+            aux_grad = (d_aux > aux_hard_b) & (d_aux <= aux_pref_b)
+            aux_frac = (aux_pref_b - d_aux.astype(np.float32)) / max(1, (aux_pref_b - aux_hard_b))
+            cost[aux_grad] = np.maximum(cost[aux_grad], C.COST_OBS_WEIGHT * aux_frac[aux_grad])
 
         if self.poison.any():
             ph = max(1, int(round(C.POISON_HARD_DIST / res)))

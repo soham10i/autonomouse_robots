@@ -219,6 +219,33 @@ AUX_CONFIRM_LEVEL = 12.0
 HARD_OBS_DIST = ROBOT_HALF_WIDTH + 0.004  # m -> lethal (~0.12); matches the footprint
 CENTER_PREF_RANGE = 0.30                  # m; center-seeking cost reaches this far
 COST_OBS_WEIGHT = 10.0                    # strength of the centre pull
+
+# Floating-wall (aux/depth) cells get EXTRA standoff beyond the lidar-wall
+# margins above. Aux confidence is sparser (2-frame confirm, see AUX_MIN_HITS)
+# and the depth camera is blind inside AUX_MAX_RANGE's near edge, so the
+# robot's localisation of a floating panel is noisier than a lidar-mapped
+# wall's -- A* should give it more berth and start curving away from it
+# sooner, rather than threading it as tightly as a solid, precisely-mapped
+# wall. Kept small enough not to close off genuine 0.39-0.40 m corridors
+# (those are lidar-wall gaps, not aux-bounded -- see selftest's corridor test).
+AUX_HARD_MARGIN_M = 0.05                  # m; extra lethal-radius margin for aux cells
+AUX_PREF_MARGIN_M = 0.15                  # m; extra soft/gradient-zone margin for aux cells
+AUX_HARD_OBS_DIST = HARD_OBS_DIST + AUX_HARD_MARGIN_M
+AUX_CENTER_PREF_RANGE = CENTER_PREF_RANGE + AUX_PREF_MARGIN_M
+
+# Wheel-slip odometry gate: wheel encoders can't tell "driving" from "wheels
+# spinning against an obstacle" -- both report the same delta. When commanded
+# to move in a direction where live lidar shows near-zero clearance, the
+# encoder-reported translation this tick is almost certainly slip and is
+# dropped (heading stays IMU-sourced, unaffected). See
+# NavigationController._is_wheel_slip. SLIP_CLEAR_DIST sits well inside
+# DWA_SAFE_RADIUS (0.12 m, the normal rollout-rejection clearance) so genuine
+# slow progress through a tight-but-passable gap is never mistaken for slip.
+SLIP_MIN_CMD_V = 0.02                     # m/s; below this treat the robot as not
+                                          # trying to move, so no slip check applies
+SLIP_CLEAR_DIST = 0.05                     # m; front/rear clearance below this while
+                                          # commanded to move that way -> treat this
+                                          # tick's translation as slip, not real motion
 SIMPLIFY_MAX_COST = 3.5                   # only line-of-sight-shortcut the A* path
                                           # through cells at least this open (~>0.24 m
                                           # clearance); tight gaps keep their dense
@@ -382,6 +409,31 @@ RECOVERY_SPIN_W = 1.5           # rad/s
 RECOVERY_SPIN_T = 1.0           # s
 RECOVERY_REAR_MIN_CLEAR = 0.25  # m; if a wall is this close behind, skip reverse
 RECOVERY_MAX_CHAIN = 4          # consecutive recoveries before a hard replan
+
+# ===========================================================================
+# Frontier-starvation escape (reliability hardening)
+# ===========================================================================
+# EXPL_MAX_RADIUS_M and the tiny anti-self-boxing disc in refresh_costmap were
+# tuned against ONE spawn pose. A different spawn can leave the robot in a
+# corner (a floating-wall/poison edge nook) those fixed numbers don't cover:
+# select_frontier_goal() returns nothing forever, _explore() falls into its
+# v=0 rescan-spin fallback, RECOVERY reverses/spins and hands back to the same
+# state, and nothing ever changes -- an unbounded spin/recover loop (observed
+# stuck 45+ s at one pose, heading sweeping +-180 deg, on a moved-spawn run).
+# These knobs make a persistently frontier-starved robot widen its own search
+# net and, as a last resort, drive itself out reactively on live lidar alone
+# (bypassing the possibly-wrong map that caused the starvation) instead of
+# spinning in place indefinitely.
+NO_FRONTIER_MAX_STRIKES = 4     # consecutive spin-and-rescan windows (each
+                                # NO_FRONTIER_SPIN_S long) before max escalation
+EXPL_RADIUS_RELAX_STEP_M = 2.0  # m added to EXPL_MAX_RADIUS_M per strike
+EXPL_RADIUS_RELAX_MAX_M = 8.0   # m; cap on the total radius relaxation
+BOX_CLEAR_STEP_M = 0.10         # m added to the anti-self-boxing disc per strike
+BOX_CLEAR_MAX_M = 0.50          # m; cap on that disc radius
+ESCAPE_DRIVE_V = 0.16           # m/s; reactive escape forward speed
+ESCAPE_STEER_W = 1.0            # rad/s; steer gain toward the freer side
+ESCAPE_MIN_FRONT_CLEAR = 0.25   # m; below this, turn in place instead of driving
+ESCAPE_DRIVE_T = 2.5            # s; duration of one escape burst
 
 # ===========================================================================
 # Perception — HSV thresholds (OpenCV convention, H in [0,179])

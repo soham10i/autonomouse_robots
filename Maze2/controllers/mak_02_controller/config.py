@@ -130,6 +130,16 @@ L_FREE_THRESH = -0.35           # L below this => free
 LIDAR_RANGE_MIN = 0.12          # m, drop closer beams (self-return / noise)
 LIDAR_RANGE_MAX = 8.0           # m
 LIDAR_MAX_INTEGRATE = 5.0       # m, do not map endpoints beyond this (keeps map crisp)
+LIDAR_GRAZE_MAX_DEG = 80.0      # beams striking a surface at more than this incidence
+                                # (measured from the surface NORMAL) contribute their
+                                # endpoint but NOT their free ray.  A wall face sits
+                                # mid-cell, so a near-parallel beam travels the free
+                                # sliver *inside the wall's own cell row* for up to
+                                # 0.02/tan(a) metres -- at 1 deg that free-marks ~46
+                                # wall cells while stamping just 1 occupied.  Ungated,
+                                # those misses out-vote the hits and corridor walls
+                                # erode away.  Detected per beam from |dr/dtheta|,
+                                # which equals r*tan(incidence) on a straight surface.
 
 # ===========================================================================
 # Depth-camera auxiliary obstacle layer (floating/low walls the lidar misses)

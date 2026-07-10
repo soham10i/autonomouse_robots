@@ -3,18 +3,31 @@ from __future__ import annotations
 
 import heapq
 import math
+from typing import List, Optional, Tuple
 
 import numpy as np
 
 import config as C
 
-_SQRT2 = math.sqrt(2.0)
-_NEIGHBORS = [(-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
-              (-1, -1, _SQRT2), (-1, 1, _SQRT2), (1, -1, _SQRT2), (1, 1, _SQRT2)]
+_SQRT2: float = math.sqrt(2.0)
+_NEIGHBORS: List[Tuple[int, int, float]] = [
+    (-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
+    (-1, -1, _SQRT2), (-1, 1, _SQRT2), (1, -1, _SQRT2), (1, 1, _SQRT2)
+]
 
 
-def _nearest_free(lethal, ix, iy, max_r=12):
-    """Snap a lethal target cell to the closest non-lethal cell (spiral search)."""
+def _nearest_free(lethal: np.ndarray, ix: int, iy: int, max_r: int = 12) -> Optional[Tuple[int, int]]:
+    """Snap a lethal target cell to the closest non-lethal cell (spiral search).
+    
+    Args:
+        lethal (np.ndarray): The boolean lethal obstacle mask.
+        ix (int): Target X cell index.
+        iy (int): Target Y cell index.
+        max_r (int, optional): Maximum radius in cells to search. Defaults to 12.
+
+    Returns:
+        Optional[Tuple[int, int]]: The closest free cell (x, y) or None if none found.
+    """
     n = lethal.shape[0]
     if 0 <= ix < n and 0 <= iy < n and not lethal[ix, iy]:
         return ix, iy
@@ -29,8 +42,19 @@ def _nearest_free(lethal, ix, iy, max_r=12):
     return None
 
 
-def plan(cost, lethal, start_cell, goal_cell, allow_start_lethal=True):
-    """A* from ``start_cell`` to ``goal_cell``.  Returns a list of (ix,iy) or None."""
+def plan(cost: np.ndarray, lethal: np.ndarray, start_cell: Tuple[int, int], goal_cell: Tuple[int, int], allow_start_lethal: bool = True) -> Optional[List[Tuple[int, int]]]:
+    """A* from ``start_cell`` to ``goal_cell``.
+
+    Args:
+        cost (np.ndarray): Float32 grid of travel costs.
+        lethal (np.ndarray): Boolean grid of lethal obstacles.
+        start_cell (Tuple[int, int]): The starting cell (x, y).
+        goal_cell (Tuple[int, int]): The target cell (x, y).
+        allow_start_lethal (bool, optional): Whether to permit a lethal start cell (to escape). Defaults to True.
+
+    Returns:
+        Optional[List[Tuple[int, int]]]: A list of (x, y) cell indices forming the path, or None if no path found.
+    """
     n = cost.shape[0]
     sx, sy = start_cell
     gx, gy = goal_cell
@@ -43,13 +67,13 @@ def plan(cost, lethal, start_cell, goal_cell, allow_start_lethal=True):
 
     res = C.GRID_RESOLUTION
 
-    def h(x, y):
+    def h(x: int, y: int) -> float:
         dx, dy = abs(x - gx), abs(y - gy)
-        return (max(dx, dy) + (_SQRT2 - 1.0) * min(dx, dy)) * res
+        return float((max(dx, dy) + (_SQRT2 - 1.0) * min(dx, dy)) * res)
 
     start = (sx, sy)
     goal = (gx, gy)
-    open_heap = [(h(sx, sy), 0.0, start)]
+    open_heap: List[Tuple[float, float, Tuple[int, int]]] = [(h(sx, sy), 0.0, start)]
     g_score = {start: 0.0}
     came = {}
     closed = set()
@@ -87,13 +111,23 @@ def plan(cost, lethal, start_cell, goal_cell, allow_start_lethal=True):
     return None
 
 
-def _line_clear(lethal, a, b, cost=None, max_cost=None):
+def _line_clear(lethal: np.ndarray, a: Tuple[int, int], b: Tuple[int, int], cost: Optional[np.ndarray] = None, max_cost: Optional[float] = None) -> bool:
     """True if the integer segment a->b crosses no lethal cell (Bresenham).
 
     When ``cost``/``max_cost`` are given, the segment must ALSO stay in cells of
     cost <= ``max_cost`` (i.e. genuinely open / central cells).  This stops the
     shortcut from straightening a carefully centred path through a tight gap back
     against a wall: a shortcut is only taken where there is room to spare.
+    
+    Args:
+        lethal (np.ndarray): Boolean grid of lethal obstacles.
+        a (Tuple[int, int]): Start cell (x, y).
+        b (Tuple[int, int]): End cell (x, y).
+        cost (Optional[np.ndarray], optional): Float32 grid of travel costs. Defaults to None.
+        max_cost (Optional[float], optional): Maximum allowed cost for a valid line. Defaults to None.
+
+    Returns:
+        bool: True if the line-of-sight is clear, False otherwise.
     """
     x0, y0 = a
     x1, y1 = b
@@ -106,7 +140,7 @@ def _line_clear(lethal, a, b, cost=None, max_cost=None):
     while True:
         if not (0 <= x < n and 0 <= y < n) or lethal[x, y]:
             return False
-        if cost is not None and cost[x, y] > max_cost:
+        if cost is not None and max_cost is not None and cost[x, y] > max_cost:
             return False
         if x == x1 and y == y1:
             return True
@@ -119,12 +153,20 @@ def _line_clear(lethal, a, b, cost=None, max_cost=None):
             y += sy
 
 
-def simplify(cells, lethal, cost=None):
+def simplify(cells: Optional[List[Tuple[int, int]]], lethal: np.ndarray, cost: Optional[np.ndarray] = None) -> Optional[List[Tuple[int, int]]]:
     """Greedy line-of-sight shortcut of a cell path (fewer, longer segments).
 
     Pass ``cost`` (the costmap) to keep shortcuts out of tight passages so the
     dense, centred A* path is preserved where clearance is scarce; omit it for
     the plain lethal-only behaviour.
+    
+    Args:
+        cells (Optional[List[Tuple[int, int]]]): The input path of cell coordinates.
+        lethal (np.ndarray): Boolean grid of lethal obstacles.
+        cost (Optional[np.ndarray], optional): Float32 cost grid. Defaults to None.
+
+    Returns:
+        Optional[List[Tuple[int, int]]]: The simplified path, or None if the input was None.
     """
     if not C.PATH_SIMPLIFY or cells is None or len(cells) <= 2:
         return cells

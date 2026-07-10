@@ -42,19 +42,18 @@ _DATE_FORMAT = "%H:%M:%S"
 
 
 def get_logger(name: str, level: int = logging.INFO) -> logging.Logger:
-    """Return a console logger configured once per name.
+    """Returns a console logger configured once per name.
 
-    The logger is idempotent: repeated calls with the same ``name`` reuse the
-    existing handler instead of stacking duplicates (a classic cause of every
-    line being printed N times). Propagation is disabled so controller output
-    does not also bubble up to the Webots root logger.
+    The logger is idempotent: repeated calls with the same `name` reuse the
+    existing handler instead of stacking duplicates. Propagation is disabled so
+    controller output does not also bubble up to the Webots root logger.
 
     Args:
-        name: Dotted logger name, e.g. ``"navctl.maze4"``.
-        level: Minimum level to emit; defaults to :data:`logging.INFO`.
+        name (str): Dotted logger name, e.g. "navctl.maze5".
+        level (int, optional): Minimum logging level to emit. Defaults to logging.INFO.
 
     Returns:
-        The configured :class:`logging.Logger`.
+        logging.Logger: The configured logger instance.
     """
     logger = logging.getLogger(name)
     logger.setLevel(level)
@@ -82,13 +81,12 @@ class RunEventLog:
 
     def __init__(self, output_dir: str, filename: str = "run_events.jsonl",
                  logger: Optional[logging.Logger] = None) -> None:
-        """Open the event log under ``output_dir``.
+        """Opens the event log under the specified output directory.
 
         Args:
-            output_dir: Directory to write the JSONL file into (created if
-                missing). Typically the controller's ``maps/`` folder.
-            filename: Event-log file name.
-            logger: Optional logger used to report telemetry-subsystem faults.
+            output_dir (str): Directory to write the JSONL file into (created if missing).
+            filename (str, optional): Event-log file name. Defaults to "run_events.jsonl".
+            logger (Optional[logging.Logger], optional): Logger used to report telemetry faults. Defaults to None.
         """
         self._logger = logger
         self._path = os.path.join(output_dir, filename)
@@ -102,21 +100,21 @@ class RunEventLog:
 
     @property
     def path(self) -> str:
-        """Absolute-or-relative path of the backing JSONL file."""
+        """str: Absolute or relative path of the backing JSONL file."""
         return self._path
 
     def event(self, name: str, level: str = "INFO", *,
               sim_time: Optional[float] = None, tick: Optional[int] = None,
               state: Optional[str] = None, **data: Any) -> None:
-        """Record one structured event.
+        """Records one structured event to the log.
 
         Args:
-            name: Event identifier, e.g. ``"state_transition"`` or ``"fault"``.
-            level: Severity label (``"INFO"``, ``"WARNING"``, ``"ERROR"``).
-            sim_time: Simulation clock time, if known.
-            tick: Control-loop iteration counter, if known.
-            state: Current mission state label, if known.
-            **data: Arbitrary JSON-serialisable payload for the event.
+            name (str): Event identifier, e.g. "state_transition" or "fault".
+            level (str, optional): Severity label ("INFO", "WARNING", "ERROR"). Defaults to "INFO".
+            sim_time (Optional[float], optional): Simulation clock time, if known.
+            tick (Optional[int], optional): Control-loop iteration counter, if known.
+            state (Optional[str], optional): Current mission state label, if known.
+            **data (Any): Arbitrary JSON-serialisable payload for the event.
         """
         if self._fh is None:
             return
@@ -141,7 +139,7 @@ class RunEventLog:
                 self._logger.warning("event write failed: %s", exc)
 
     def close(self) -> None:
-        """Flush and close the backing file; safe to call more than once."""
+        """Flushes and closes the backing file; safe to call more than once."""
         if self._fh is not None:
             with contextlib.suppress(OSError):
                 self._fh.close()
@@ -154,31 +152,25 @@ def guarded_stage(stage: str, logger: logging.Logger,
                   sim_time: Optional[float] = None, tick: Optional[int] = None,
                   state: Optional[str] = None,
                   reraise: bool = False) -> Iterator[None]:
-    """Run one control-loop stage with fault isolation.
+    """Runs one control-loop stage with fault isolation.
 
-    Wrap a single pipeline stage (sensing, SLAM, perception, planning, driving,
-    visualisation, …) so that an unexpected exception inside it is captured
-    instead of aborting the whole mission. The fault is logged with a full
-    traceback and mirrored into ``event_log`` together with the tick/state
-    context needed to trace it back to a specific sensor frame or transition.
-
-    This is intentionally a log-and-continue guard: it only ever fires on a real
-    exception (never on the nominal path exercised by the offline self-tests), so
-    it preserves validated behaviour while making genuine faults recoverable and
-    traceable.
+    Wraps a single pipeline stage (sensing, SLAM, perception, planning, driving)
+    so that an unexpected exception inside it is captured instead of aborting the
+    whole mission. The fault is logged with a full traceback and mirrored into
+    the event log together with the tick/state context needed to trace it back
+    to a specific sensor frame or transition.
 
     Args:
-        stage: Human-readable stage name for the fault record.
-        logger: Logger to report the fault through.
-        event_log: Optional structured log to also record the fault into.
-        sim_time: Simulation time at the point of the call.
-        tick: Control-loop iteration counter.
-        state: Current mission state label.
-        reraise: If ``True``, re-raise after logging (use for stages where a
-            fault genuinely cannot be tolerated).
+        stage (str): Human-readable stage name for the fault record.
+        logger (logging.Logger): Logger to report the fault through.
+        event_log (Optional[RunEventLog], optional): Structured log to also record the fault into.
+        sim_time (Optional[float], optional): Simulation time at the point of the call.
+        tick (Optional[int], optional): Control-loop iteration counter.
+        state (Optional[str], optional): Current mission state label.
+        reraise (bool, optional): If True, re-raise after logging. Defaults to False.
 
     Yields:
-        Control to the wrapped block.
+        Iterator[None]: Control to the wrapped block.
     """
     try:
         yield

@@ -8,14 +8,23 @@ candidate exploration goals; the main controller ranks them by
 from __future__ import annotations
 
 import math
+from typing import Any, Dict, List, Set, Tuple
 
 import numpy as np
 
 import config as C
 
 
-def detect_frontier_cells(grid, lethal):
-    """Return a boolean grid of frontier cells (free, touching unknown, safe)."""
+def detect_frontier_cells(grid: Any, lethal: np.ndarray) -> np.ndarray:
+    """Return a boolean grid of frontier cells (free, touching unknown, safe).
+    
+    Args:
+        grid (Any): An OccupancyGrid instance.
+        lethal (np.ndarray): The boolean lethal obstacle mask from the costmap.
+
+    Returns:
+        np.ndarray: A boolean mask where True indicates a valid frontier cell.
+    """
     free = grid.free_mask()
     unknown = grid.unknown_mask()
     # a free cell adjacent (4-conn) to any unknown cell
@@ -28,13 +37,20 @@ def detect_frontier_cells(grid, lethal):
     return frontier
 
 
-def _cluster(frontier):
-    """Label 8-connected frontier clusters -> list of (cells list)."""
+def _cluster(frontier: np.ndarray) -> List[List[Tuple[int, int]]]:
+    """Label 8-connected frontier clusters -> list of (cells list).
+    
+    Args:
+        frontier (np.ndarray): The boolean frontier mask.
+
+    Returns:
+        List[List[Tuple[int, int]]]: A list of clusters, where each cluster is a list of (x, y) cell indices.
+    """
     n = frontier.shape[0]
     visited = np.zeros_like(frontier)
-    clusters = []
+    clusters: List[List[Tuple[int, int]]] = []
     xs, ys = np.nonzero(frontier)
-    cells = set(zip(xs.tolist(), ys.tolist()))
+    cells: Set[Tuple[int, int]] = set(zip(xs.tolist(), ys.tolist()))
     for seed in list(cells):
         if visited[seed]:
             continue
@@ -56,12 +72,22 @@ def _cluster(frontier):
     return clusters
 
 
-def find_frontiers(grid, lethal, robot_xy, start_xy):
+def find_frontiers(grid: Any, lethal: np.ndarray, robot_xy: Tuple[float, float], start_xy: Tuple[float, float]) -> List[Dict[str, Any]]:
     """Return a list of candidate dicts: ``{cell, world, size}`` (filtered).
 
     Filtered by minimum cluster size, a minimum distance from the robot, and a
     maximum radius from the start pose (so a gap in the boundary cannot lure the
     robot off into the unbounded floor outside the maze).
+    
+    Args:
+        grid (Any): An OccupancyGrid instance.
+        lethal (np.ndarray): The boolean lethal obstacle mask from the costmap.
+        robot_xy (Tuple[float, float]): Current robot position in world coordinates (x, y).
+        start_xy (Tuple[float, float]): Starting robot position in world coordinates (x, y).
+
+    Returns:
+        List[Dict[str, Any]]: A list of dictionaries, each describing a frontier candidate 
+        with keys 'cell' (Tuple[int, int]), 'world' (Tuple[float, float]), and 'size' (int).
     """
     frontier = detect_frontier_cells(grid, lethal)
     if not frontier.any():
@@ -69,7 +95,7 @@ def find_frontiers(grid, lethal, robot_xy, start_xy):
     clusters = _cluster(frontier)
     rx, ry = robot_xy
     sx, sy = start_xy
-    out = []
+    out: List[Dict[str, Any]] = []
     for comp in clusters:
         if len(comp) < C.FRONTIER_MIN_CLUSTER:
             continue

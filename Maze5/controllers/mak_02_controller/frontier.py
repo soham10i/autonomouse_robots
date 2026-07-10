@@ -1,21 +1,39 @@
-"""Frontier detection + clustering for exploration.
+"""Frontier detection and clustering logic for autonomous exploration.
 
-A *frontier* cell is FREE and 4-adjacent to at least one UNKNOWN cell — the
-boundary between explored and unexplored space.  Clusters of frontier cells are
-candidate exploration goals; the main controller ranks them by
-``info_gain - dist`` using A* path length and picks the best reachable one.
+A *frontier* cell is defined as a FREE cell that is 4-adjacent to at least one
+UNKNOWN cell, representing the boundary between explored and unexplored space.
+Clusters of frontier cells act as candidate exploration goals. The main controller
+evaluates these candidates by a heuristic prioritizing information gain (cluster size)
+and penalizing path distance, selecting the optimal reachable frontier.
 """
 from __future__ import annotations
 
 import math
+from typing import Any, TYPE_CHECKING
 
 import numpy as np
 
 import config as C
 
+if TYPE_CHECKING:
+    from mapping import OccupancyGrid
 
-def detect_frontier_cells(grid, lethal):
-    """Return a boolean grid of frontier cells (free, touching unknown, safe)."""
+
+def detect_frontier_cells(grid: OccupancyGrid, lethal: np.ndarray) -> np.ndarray:
+    """Identifies all valid frontier cells within the current occupancy grid.
+
+    A valid frontier cell must be marked as free space, must be 4-connected to
+    at least one unknown cell, and must not overlap with lethal obstacle regions.
+
+    Args:
+        grid (OccupancyGrid): The current log-odds occupancy map instance.
+        lethal (np.ndarray): A 2D boolean array where True indicates a lethal cell
+            (impassable obstacles and their hard inflation radius).
+
+    Returns:
+        np.ndarray: A 2D boolean array of the same shape as the grid, where True
+            indicates a valid frontier cell.
+    """
     free = grid.free_mask()
     unknown = grid.unknown_mask()
     # a free cell adjacent (4-conn) to any unknown cell
@@ -28,8 +46,16 @@ def detect_frontier_cells(grid, lethal):
     return frontier
 
 
-def _cluster(frontier):
-    """Label 8-connected frontier clusters -> list of (cells list)."""
+def _cluster(frontier: np.ndarray) -> list[list[tuple[int, int]]]:
+    """Groups contiguous frontier cells into 8-connected components (clusters).
+
+    Args:
+        frontier (np.ndarray): A 2D boolean array indicating frontier cells.
+
+    Returns:
+        list[list[tuple[int, int]]]: A list of clusters, where each cluster is a
+            list of cell coordinates ``(x, y)`` belonging to that connected component.
+    """
     n = frontier.shape[0]
     visited = np.zeros_like(frontier)
     clusters = []
@@ -56,12 +82,32 @@ def _cluster(frontier):
     return clusters
 
 
-def find_frontiers(grid, lethal, robot_xy, start_xy):
-    """Return a list of candidate dicts: ``{cell, world, size}`` (filtered).
+def find_frontiers(
+    grid: OccupancyGrid,
+    lethal: np.ndarray,
+    robot_xy: tuple[float, float],
+    start_xy: tuple[float, float]
+) -> list[dict[str, Any]]:
+    """Extracts, filters, and formats frontier clusters as candidate navigation goals.
 
-    Filtered by minimum cluster size, a minimum distance from the robot, and a
-    maximum radius from the start pose (so a gap in the boundary cannot lure the
-    robot off into the unbounded floor outside the maze).
+    Clusters are filtered out if they fall below a minimum size threshold, lie too close
+    to the current robot position, or exceed a maximum exploration radius measured from
+    the initial starting pose. The maximum radius bounds the exploration to prevent
+    the robot from chasing gaps onto unbounded exterior regions.
+
+    Args:
+        grid (OccupancyGrid): The current occupancy map instance.
+        lethal (np.ndarray): A 2D boolean array indicating lethal (impassable) cells.
+        robot_xy (tuple[float, float]): The current ``(x, y)`` world coordinates of the robot.
+        start_xy (tuple[float, float]): The initial ``(x, y)`` world coordinates of the robot
+            at mission start.
+
+    Returns:
+        list[dict[str, Any]]: A list of dictionaries representing viable frontier goals.
+            Each dictionary contains:
+            - ``"cell"`` (tuple[int, int]): Grid coordinates of the representative frontier cell.
+            - ``"world"`` (tuple[float, float]): World coordinates of the representative cell.
+            - ``"size"`` (int): The number of cells comprising the frontier cluster.
     """
     frontier = detect_frontier_cells(grid, lethal)
     if not frontier.any():
@@ -79,7 +125,7 @@ def find_frontiers(grid, lethal, robot_xy, start_xy):
         ciy = int(round(arr[:, 1].mean()))
         # nearest cluster cell to the centroid
         d2 = (arr[:, 0] - cix) ** 2 + (arr[:, 1] - ciy) ** 2
-        cix, ciy = arr[int(np.argmin(d2))]
+        cix, ciy = arr[int(np.argmin(d2))]  # type: ignore
         wx, wy = grid.grid_to_world(cix, ciy)
         if math.hypot(wx - rx, wy - ry) < C.FRONTIER_MIN_DIST_M:
             continue

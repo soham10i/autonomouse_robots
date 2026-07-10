@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import math
 from collections import deque
+from typing import Any, Deque, Dict, Optional, Tuple
 
 import numpy as np
 
@@ -16,8 +17,15 @@ import config as C
 from geometry import transform_points, wrap_angle
 
 
-def bgr_to_hsv(bgr):
-    """BGR uint8 (H,W,3) -> HSV uint8, OpenCV convention (H in [0,179])."""
+def bgr_to_hsv(bgr: np.ndarray) -> np.ndarray:
+    """Converts a BGR image to HSV color space.
+
+    Args:
+        bgr (np.ndarray): BGR image of shape (H, W, 3) and type uint8.
+
+    Returns:
+        np.ndarray: HSV image of shape (H, W, 3) and type uint8, using the OpenCV convention (H in [0, 179]).
+    """
     f = bgr.astype(np.float32) / 255.0
     b, g, r = f[..., 0], f[..., 1], f[..., 2]
     cmax = np.maximum(np.maximum(r, g), b)
@@ -37,29 +45,59 @@ def bgr_to_hsv(bgr):
     return np.stack([h, s, v], axis=-1).astype(np.uint8)
 
 
-def in_range(hsv, lo, hi):
-    lo = np.asarray(lo, dtype=np.uint8)
-    hi = np.asarray(hi, dtype=np.uint8)
-    return np.all((hsv >= lo) & (hsv <= hi), axis=-1)
+def in_range(hsv: np.ndarray, lo: Tuple[int, int, int], hi: Tuple[int, int, int]) -> np.ndarray:
+    """Creates a boolean mask for pixels within a specific HSV range.
+
+    Args:
+        hsv (np.ndarray): The HSV image.
+        lo (Tuple[int, int, int]): The lower bound HSV values.
+        hi (Tuple[int, int, int]): The upper bound HSV values.
+
+    Returns:
+        np.ndarray: A boolean mask array of shape (H, W).
+    """
+    lo_arr = np.asarray(lo, dtype=np.uint8)
+    hi_arr = np.asarray(hi, dtype=np.uint8)
+    return np.all((hsv >= lo_arr) & (hsv <= hi_arr), axis=-1)
 
 
 class Perception:
-    """Camera-based HSV pillar detection and green poison-floor projection into world coordinates."""
-    def __init__(self, width, height, fov, mount_z=None):
-        self.w = int(width)
-        self.h = int(height)
-        self.fov = float(fov)
-        self.fx = 0.5 * self.w / math.tan(0.5 * self.fov)
-        self.cx = 0.5 * self.w
-        self.cy = 0.5 * self.h
-        self.mount_z = C.CAMERA_MOUNT_Z if mount_z is None else mount_z
-        self._buf = {"blue": deque(maxlen=C.PILLAR_OBS_AVG_N),
-                     "yellow": deque(maxlen=C.PILLAR_OBS_AVG_N)}
-        # confirmed/averaged world position of each pillar once seen
-        self.pillar_world = {"blue": None, "yellow": None}
+    """Camera-based HSV pillar detection and green poison-floor projection into world coordinates.
+    
+    Attributes:
+        w (int): Camera image width.
+        h (int): Camera image height.
+        fov (float): Camera field of view.
+        fx (float): Focal length in the x-axis.
+        cx (float): Principal point x-coordinate.
+        cy (float): Principal point y-coordinate.
+        mount_z (float): Camera mount height in meters.
+        pillar_world (Dict[str, Optional[Tuple[float, float]]]): Confirmed world position of detected pillars.
+    """
+    def __init__(self, width: int, height: int, fov: float, mount_z: Optional[float] = None) -> None:
+        """Initializes the perception system with camera intrinsics.
 
-    # ------------------------------------------------------------- depth
-    def _depth_at(self, depth, u, v):
+        Args:
+            width (int): Camera image width.
+            height (int): Camera image height.
+            fov (float): Camera horizontal field of view.
+            mount_z (Optional[float], optional): Camera mount height. Defaults to `config.CAMERA_MOUNT_Z`.
+        """
+        self.w: int = int(width)
+        self.h: int = int(height)
+        self.fov: float = float(fov)
+        self.fx: float = 0.5 * self.w / math.tan(0.5 * self.fov)
+        self.cx: float = 0.5 * self.w
+        self.cy: float = 0.5 * self.h
+        self.mount_z: float = C.CAMERA_MOUNT_Z if mount_z is None else mount_z
+        self._buf: Dict[str, Deque[Tuple[float, float]]] = {
+            "blue": deque(maxlen=C.PILLAR_OBS_AVG_N),
+            "yellow": deque(maxlen=C.PILLAR_OBS_AVG_N)
+        }
+        self.pillar_world: Dict[str, Optional[Tuple[float, float]]] = {"blue": None, "yellow": None}
+
+    def _depth_at(self, depth: Optional[np.ndarray], u: float, v: float) -> float:
+        """Estimates the depth at a given pixel coordinate using a small neighborhood patch."""
         if depth is None:
             return float("nan")
         depth = np.asarray(depth, dtype=np.float32).reshape(self.h, self.w)
@@ -68,8 +106,8 @@ class Perception:
         good = patch[np.isfinite(patch) & (patch > 0.0)]
         return float(np.median(good)) if good.size else float("nan")
 
-    # ------------------------------------------------------ pillar detect
-    def _detect_one(self, hsv, depth, lo, hi):
+    def _detect_one(self, hsv: np.ndarray, depth: Optional[np.ndarray], lo: Tuple[int, int, int], hi: Tuple[int, int, int]) -> Optional[Dict[str, Any]]:
+        """Detects a single colored blob and computes its properties."""
         mask = in_range(hsv, lo, hi)
         area = int(mask.sum())
         if area < C.PILLAR_MIN_PIXELS:
@@ -80,7 +118,6 @@ class Perception:
         pix_w = int(xs.max() - xs.min() + 1)
         aspect = (pix_w / pix_h) if pix_h > 0 else float("nan")
         rng_d = self._depth_at(depth, cu, cv)
-        # range from known pillar height (works at close range where depth blinds)
         rng_h = (self.fx * C.PILLAR_HEIGHT / pix_h) if pix_h > 0 else float("nan")
         if np.isfinite(rng_d) and 0.0 < rng_d <= C.PILLAR_MAX_DETECT_RANGE:
             rng = rng_d
@@ -91,7 +128,8 @@ class Perception:
         return {"u": cu, "v": cv, "area": area, "bearing": bearing,
                 "range": rng, "est_height": est_h, "aspect": aspect}
 
-    def _valid(self, det):
+    def _valid(self, det: Optional[Dict[str, Any]]) -> bool:
+        """Validates a pillar detection against configured constraints."""
         if det is None:
             return False
         rng = det["range"]
@@ -107,13 +145,19 @@ class Perception:
             return False
         return True
 
-    def update_pillars(self, bgr, depth, pose):
-        """Detect both pillars, update their running-mean world positions.
+    def update_pillars(self, bgr: np.ndarray, depth: Optional[np.ndarray], pose: Tuple[float, float, float]) -> Dict[str, Optional[Dict[str, Any]]]:
+        """Detects both pillars and updates their running-mean world positions.
 
-        Returns ``{'blue': det|None, 'yellow': det|None}`` (raw detections).
+        Args:
+            bgr (np.ndarray): The BGR camera image.
+            depth (Optional[np.ndarray]): The depth range image.
+            pose (Tuple[float, float, float]): The current world pose of the robot.
+
+        Returns:
+            Dict[str, Optional[Dict[str, Any]]]: A dictionary containing the raw detections for 'blue' and 'yellow' pillars.
         """
         hsv = bgr_to_hsv(bgr)
-        out = {}
+        out: Dict[str, Optional[Dict[str, Any]]] = {}
         for name, (lo, hi) in (("blue", C.HSV_BLUE), ("yellow", C.HSV_YELLOW)):
             det = self._detect_one(hsv, depth, lo, hi)
             out[name] = det
@@ -121,10 +165,10 @@ class Perception:
                 self._ingest(name, det, pose)
         return out
 
-    def _ingest(self, name, det, pose):
+    def _ingest(self, name: str, det: Dict[str, Any], pose: Tuple[float, float, float]) -> None:
+        """Ingests a valid detection into the running mean world position for the pillar."""
         x, y, th = pose
         ang = wrap_angle(th + det["bearing"])
-        # stand a little short of the centre so we measure the front face
         rng = det["range"]
         wx = x + rng * math.cos(ang)
         wy = y + rng * math.sin(ang)
@@ -132,15 +176,21 @@ class Perception:
         if buf:
             mean = np.mean(np.array(buf), axis=0)
             if math.hypot(wx - mean[0], wy - mean[1]) > C.PILLAR_OUTLIER_REJECT_M:
-                # large jump: reset rather than average through an outlier
                 buf.clear()
         buf.append((wx, wy))
         m = np.mean(np.array(buf), axis=0)
         self.pillar_world[name] = (float(m[0]), float(m[1]))
 
-    # --------------------------------------------------- green projection
-    def green_floor_body(self, bgr, max_range=None):
-        """Project green floor pixels to BODY-frame points (M,2), flat-floor model."""
+    def green_floor_body(self, bgr: np.ndarray, max_range: Optional[float] = None) -> np.ndarray:
+        """Projects green floor pixels to body-frame coordinates using a flat-floor model.
+
+        Args:
+            bgr (np.ndarray): The BGR camera image.
+            max_range (Optional[float], optional): Maximum range to project out to. Defaults to `config.GREEN_PROJECT_MAX_RANGE`.
+
+        Returns:
+            np.ndarray: Array of shape (M, 2) containing the (x, y) coordinates of green floor points in the body frame.
+        """
         if max_range is None:
             max_range = C.GREEN_PROJECT_MAX_RANGE
         hsv = bgr_to_hsv(bgr)
@@ -165,18 +215,30 @@ class Perception:
         y_r = -(us - self.cx) * d / self.fx
         return np.stack([x_r, y_r], axis=1)
 
-    def green_floor_world(self, bgr, pose):
-        """Project green floor pixels to world (M,2) for the sticky poison map."""
+    def green_floor_world(self, bgr: np.ndarray, pose: Tuple[float, float, float]) -> np.ndarray:
+        """Projects green floor pixels to world coordinates for mapping.
+
+        Args:
+            bgr (np.ndarray): The BGR camera image.
+            pose (Tuple[float, float, float]): The current world pose of the robot.
+
+        Returns:
+            np.ndarray: Array of shape (M, 2) containing the (x, y) coordinates of green floor points in the world frame.
+        """
         body = self.green_floor_body(bgr)
         if body.shape[0] == 0:
             return np.empty((0, 2))
         return transform_points(body, pose[0], pose[1], pose[2])
 
-    def green_reflex(self, bgr):
-        """True ONLY if poison is imminent: projected green within
-        ``GREEN_REFLEX_DIST`` m directly ahead.  Distant poison must NOT trip
-        this — it is handled by the mapped poison layer + A*/DWA — otherwise the
-        robot deadlocks facing far poison it could legally route around."""
+    def green_reflex(self, bgr: np.ndarray) -> bool:
+        """Checks if poison is imminent directly ahead to trigger a reflex halt.
+
+        Args:
+            bgr (np.ndarray): The BGR camera image.
+
+        Returns:
+            bool: True if imminent poison is detected within `GREEN_REFLEX_DIST`, False otherwise.
+        """
         if not C.GREEN_REFLEX_ENABLED:
             return False
         body = self.green_floor_body(bgr, max_range=C.GREEN_REFLEX_DIST + 0.1)

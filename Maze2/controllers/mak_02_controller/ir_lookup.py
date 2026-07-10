@@ -8,29 +8,49 @@ between them every tick.  Kept Webots-free so it is directly unit-testable;
 """
 from __future__ import annotations
 
+from typing import List, Optional, Tuple
 
-def build_lookup(table_triples, max_value_fallback=4.0):
-    """``table_triples``: flat ``[d0,val0,std0, d1,val1,std1, ...]`` as returned
-    by ``DistanceSensor.getLookupTable()`` (or ``None``/empty/short for a sensor
-    with no usable table).  Returns ``(d_min, d_max, val_at_dmin, val_at_dmax,
-    d_max)``.
+
+def build_lookup(table_triples: Optional[List[float]], max_value_fallback: float = 4.0) -> Tuple[float, float, float, float, float]:
+    """Constructs a minimal lookup cache from Webots DistanceSensor lookup table triples.
+
+    Args:
+        table_triples (Optional[List[float]]): A flat list `[d0, val0, std0, d1, val1, std1, ...]` 
+            as returned by `DistanceSensor.getLookupTable()`. If `None`, empty, or too short, 
+            a fallback table is returned.
+        max_value_fallback (float, optional): The maximum distance fallback if no valid table is given. Defaults to 4.0.
+
+    Returns:
+        Tuple[float, float, float, float, float]: A tuple containing `(d_min, d_max, val_at_dmin, val_at_dmax, d_max)`.
     """
     if not table_triples or len(table_triples) < 6:
         mx = float(max_value_fallback)
         return (0.0, mx, 0.0, mx, mx)
+    
     rows = [(float(table_triples[i]), float(table_triples[i + 1]))
             for i in range(0, len(table_triples), 3)]
     rows.sort(key=lambda r: r[0])
+    
     d_min, val_min = rows[0]
     d_max, val_max = rows[-1]
+    
     return (d_min, d_max, val_min, val_max, d_max)
 
 
-def value_to_meters(lookup, value):
-    """Invert one raw sensor ``value`` to metres using a ``build_lookup`` result."""
+def value_to_meters(lookup: Tuple[float, float, float, float, float], value: float) -> float:
+    """Inverts a raw sensor value to meters using a compiled lookup cache.
+
+    Args:
+        lookup (Tuple[float, float, float, float, float]): The precomputed lookup bounds from `build_lookup`.
+        value (float): The raw sensor value to convert.
+
+    Returns:
+        float: The corresponding distance in meters, clamped within `[d_min, d_max]`.
+    """
     d_min, d_max, v_at_dmin, v_at_dmax, _ = lookup
     if abs(v_at_dmax - v_at_dmin) < 1e-6:
         return d_max
+    
     slope = (d_max - d_min) / (v_at_dmax - v_at_dmin)
     d = d_min + (value - v_at_dmin) * slope
     return max(d_min, min(d_max, d))

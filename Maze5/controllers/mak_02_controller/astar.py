@@ -1,20 +1,43 @@
-"""A* on the costmap + line-of-sight path simplification.  Pure NumPy/stdlib."""
+"""A* algorithm implementation on an occupancy costmap with line-of-sight path simplification.
+
+This module provides a pure NumPy and standard-library implementation of the A* search
+algorithm, designed to run on a discretized grid representation of the environment.
+It includes post-processing capabilities to simplify the resulting cell paths into fewer,
+longer linear segments by ensuring clear line-of-sight via Bresenham's line algorithm.
+"""
 from __future__ import annotations
 
 import heapq
 import math
+from typing import Optional
 
 import numpy as np
 
 import config as C
 
 _SQRT2 = math.sqrt(2.0)
-_NEIGHBORS = [(-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
-              (-1, -1, _SQRT2), (-1, 1, _SQRT2), (1, -1, _SQRT2), (1, 1, _SQRT2)]
+_NEIGHBORS = [
+    (-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
+    (-1, -1, _SQRT2), (-1, 1, _SQRT2), (1, -1, _SQRT2), (1, 1, _SQRT2)
+]
 
 
-def _nearest_free(lethal, ix, iy, max_r=8):
-    """Snap a lethal target cell to the closest non-lethal cell (spiral search)."""
+def _nearest_free(lethal: np.ndarray, ix: int, iy: int, max_r: int = 8) -> Optional[tuple[int, int]]:
+    """Snaps a potentially lethal target cell to the closest non-lethal cell.
+
+    Conducts a spiraling radial search up to a maximum radius around the target
+    cell coordinates to locate a traversable grid cell.
+
+    Args:
+        lethal (np.ndarray): A 2D boolean array where True indicates impassable terrain.
+        ix (int): The x-coordinate of the target cell in grid space.
+        iy (int): The y-coordinate of the target cell in grid space.
+        max_r (int, optional): The maximum integer radius to search. Defaults to 8.
+
+    Returns:
+        Optional[tuple[int, int]]: A tuple ``(x, y)`` of the closest non-lethal cell,
+            or None if no such cell is found within the specified maximum radius.
+    """
     n = lethal.shape[0]
     if 0 <= ix < n and 0 <= iy < n and not lethal[ix, iy]:
         return ix, iy
@@ -29,8 +52,33 @@ def _nearest_free(lethal, ix, iy, max_r=8):
     return None
 
 
-def plan(cost, lethal, start_cell, goal_cell, allow_start_lethal=True):
-    """A* from ``start_cell`` to ``goal_cell``.  Returns a list of (ix,iy) or None."""
+def plan(
+    cost: np.ndarray,
+    lethal: np.ndarray,
+    start_cell: tuple[int, int],
+    goal_cell: tuple[int, int],
+    allow_start_lethal: bool = True
+) -> Optional[list[tuple[int, int]]]:
+    """Computes an optimal path from the start cell to the goal cell using A*.
+
+    The heuristic function utilizes octile distance for accurate diagonal movement estimation.
+    If the specified goal cell is located on a lethal obstacle, the algorithm automatically
+    snaps the goal to the nearest free cell before searching.
+
+    Args:
+        cost (np.ndarray): A 2D float array representing the traversal cost penalty
+            of each cell, added on top of the base Euclidean distance cost.
+        lethal (np.ndarray): A 2D boolean array indicating impassable obstacle regions.
+        start_cell (tuple[int, int]): Grid coordinates ``(x, y)`` of the starting point.
+        goal_cell (tuple[int, int]): Grid coordinates ``(x, y)`` of the desired destination.
+        allow_start_lethal (bool, optional): If True, allows the search to begin even if
+            the starting cell is currently marked lethal (useful if the robot is slightly
+            inside an inflation boundary). Defaults to True.
+
+    Returns:
+        Optional[list[tuple[int, int]]]: A continuous sequence of contiguous grid cell
+            coordinates ``(x, y)`` from start to goal, or None if no path could be found.
+    """
     n = cost.shape[0]
     sx, sy = start_cell
     gx, gy = goal_cell
@@ -43,7 +91,7 @@ def plan(cost, lethal, start_cell, goal_cell, allow_start_lethal=True):
 
     res = C.GRID_RESOLUTION
 
-    def h(x, y):
+    def h(x: int, y: int) -> float:
         dx, dy = abs(x - gx), abs(y - gy)
         return (max(dx, dy) + (_SQRT2 - 1.0) * min(dx, dy)) * res
 
@@ -87,8 +135,20 @@ def plan(cost, lethal, start_cell, goal_cell, allow_start_lethal=True):
     return None
 
 
-def _line_clear(lethal, a, b):
-    """True if the integer segment a->b crosses no lethal cell (Bresenham)."""
+def _line_clear(lethal: np.ndarray, a: tuple[int, int], b: tuple[int, int]) -> bool:
+    """Evaluates whether the discrete line segment between two cells is clear of obstacles.
+
+    Implements Bresenham's line algorithm to trace the segment and test against the
+    lethal obstacle grid map.
+
+    Args:
+        lethal (np.ndarray): A 2D boolean array of impassable cells.
+        a (tuple[int, int]): Grid coordinates of the segment start point.
+        b (tuple[int, int]): Grid coordinates of the segment end point.
+
+    Returns:
+        bool: True if the entire line segment traverses only non-lethal cells, False otherwise.
+    """
     x0, y0 = a
     x1, y1 = b
     dx, dy = abs(x1 - x0), abs(y1 - y0)
@@ -111,8 +171,21 @@ def _line_clear(lethal, a, b):
             y += sy
 
 
-def simplify(cells, lethal):
-    """Greedy line-of-sight shortcut of a cell path (fewer, longer segments)."""
+def simplify(cells: Optional[list[tuple[int, int]]], lethal: np.ndarray) -> Optional[list[tuple[int, int]]]:
+    """Simplifies a cellular path using a greedy line-of-sight shortcut technique.
+
+    Iterates through the original dense path and attempts to connect distant waypoints
+    directly via straight-line segments. If the line segment is clear of lethal obstacles,
+    intermediate points are discarded, yielding a more aggressive, geometrically direct route.
+
+    Args:
+        cells (Optional[list[tuple[int, int]]]): The input dense path of contiguous cells.
+        lethal (np.ndarray): The 2D boolean obstacle map used for line-of-sight checks.
+
+    Returns:
+        Optional[list[tuple[int, int]]]: The simplified list of critical waypoints, or
+            the original list if simplification is disabled or the path is too short.
+    """
     if not C.PATH_SIMPLIFY or cells is None or len(cells) <= 2:
         return cells
     out = [cells[0]]

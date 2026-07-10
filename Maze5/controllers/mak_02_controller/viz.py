@@ -1,14 +1,15 @@
-"""Live map / frontier visualisation.
+"""Live map and frontier visualization tooling.
 
-Renders the occupancy grid, sticky poison, detected frontiers, the global A*
-path, the carrot, both pillars and the robot pose into an RGB image.  Saves PNG
-snapshots and (optionally) shows a live OpenCV window.  Degrades gracefully if
-OpenCV / PIL are unavailable.
+Renders the occupancy grid, sticky poison layer, detected frontiers, global A* path,
+pure pursuit carrot, mapped pillars, and the robot pose into a cohesive RGB image.
+Supports saving PNG snapshots and (optionally) displaying a live OpenCV window.
+The module degrades gracefully if OpenCV or PIL dependencies are unavailable.
 """
 from __future__ import annotations
 
 import math
 import os
+from typing import Any, Optional
 
 import numpy as np
 
@@ -23,7 +24,7 @@ except Exception:
 
 _LIVE = os.environ.get("MAK02_LIVE", "1") != "0"
 
-# colours are RGB
+# Colors are specified in RGB format.
 _C_UNKNOWN = (128, 128, 128)
 _C_FREE = (245, 245, 245)
 _C_OCC = (25, 25, 25)
@@ -37,14 +38,35 @@ _C_CARROT = (230, 0, 230)
 
 
 class Visualizer:
-    """Renders the live occupancy map, costmap, planned path, frontier and pillar overlay for monitoring a run."""
-    def __init__(self, grid, scale=3):
+    """Renders the live occupancy map, costmap, planned path, and state overlay.
+
+    Attributes:
+        grid: The OccupancyGrid instance providing map geometry and layers.
+        scale (int): Display scaling factor mapping one grid cell to `scale` pixels.
+        window_ready (bool): Indicates if the live OpenCV window has been successfully opened.
+    """
+
+    def __init__(self, grid: Any, scale: int = 3) -> None:
+        """Initializes the visualizer instance.
+
+        Args:
+            grid (OccupancyGrid): The underlying log-odds occupancy map.
+            scale (int, optional): Spatial multiplier for the output image. Defaults to 3.
+        """
         self.grid = grid
         self.scale = scale
         self.window_ready = False
 
-    # ----------------------------------------------------- world -> pixel
-    def _to_px(self, wx, wy):
+    def _to_px(self, wx: float, wy: float) -> tuple[int, int]:
+        """Converts world coordinates to image pixel indices.
+
+        Args:
+            wx (float): World x-coordinate in meters.
+            wy (float): World y-coordinate in meters.
+
+        Returns:
+            tuple[int, int]: The corresponding `(column, row)` pixel indices.
+        """
         g = self.grid
         ix = (wx - g.ox) / g.res
         iy = (wy - g.oy) / g.res
@@ -52,7 +74,34 @@ class Visualizer:
         row = int((g.n - 1 - iy) * self.scale)
         return col, row
 
-    def render(self, pose, frontier_mask, path_world, carrot, pillars, state, t):
+    def render(
+        self,
+        pose: tuple[float, float, float],
+        frontier_mask: Optional[np.ndarray],
+        path_world: list[tuple[float, float]],
+        carrot: Optional[tuple[float, float]],
+        pillars: dict[str, tuple[float, float]],
+        state: str,
+        t: float
+    ) -> np.ndarray:
+        """Generates an RGB image representing the current system state.
+
+        Composites the static occupancy grid layers (free, occupied, poison, unknown),
+        overlays dynamic markers (frontiers, pillars), and draws the robot trajectory
+        and state information using OpenCV (if available).
+
+        Args:
+            pose (tuple[float, float, float]): The robot's current ``(x, y, theta)`` world pose.
+            frontier_mask (Optional[np.ndarray]): A 2D boolean array highlighting frontier cells.
+            path_world (list[tuple[float, float]]): The A* path sequence in world coordinates.
+            carrot (Optional[tuple[float, float]]): The current local-planner target waypoint.
+            pillars (dict[str, tuple[float, float]]): World coordinates of known pillars keyed by name.
+            state (str): The current string identifier of the mission finite state machine.
+            t (float): Current simulation time in seconds.
+
+        Returns:
+            np.ndarray: An ``(H, W, 3)`` uint8 numpy array containing the composited RGB image.
+        """
         g = self.grid
         n = g.n
         img = np.empty((n, n, 3), dtype=np.uint8)
@@ -77,7 +126,27 @@ class Visualizer:
             img = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
         return img
 
-    def _draw_cv(self, bgr, pose, path_world, carrot, pillars, state, t):
+    def _draw_cv(
+        self,
+        bgr: np.ndarray,
+        pose: tuple[float, float, float],
+        path_world: list[tuple[float, float]],
+        carrot: Optional[tuple[float, float]],
+        pillars: dict[str, tuple[float, float]],
+        state: str,
+        t: float
+    ) -> None:
+        """Internal helper to overlay dynamic vector graphics via OpenCV.
+
+        Args:
+            bgr (np.ndarray): The base image in BGR color space to be modified in-place.
+            pose (tuple[float, float, float]): The robot world pose.
+            path_world (list[tuple[float, float]]): The global path to render.
+            carrot (Optional[tuple[float, float]]): The local planner lookahead target.
+            pillars (dict[str, tuple[float, float]]): Coordinates of identified pillars.
+            state (str): Name of the current mission state.
+            t (float): Simulation timestamp.
+        """
         rgb2bgr = lambda c: (c[2], c[1], c[0])
         # path
         if path_world and len(path_world) >= 2:
@@ -105,7 +174,12 @@ class Visualizer:
         cv2.putText(bgr, f"{state}  t={t:5.1f}s", (8, 20),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
 
-    def show(self, img):
+    def show(self, img: np.ndarray) -> None:
+        """Displays the rendered image in a live GUI window.
+
+        Args:
+            img (np.ndarray): The RGB image generated by `render()`.
+        """
         if not (_LIVE and _HAVE_CV2):
             return
         try:
@@ -116,7 +190,18 @@ class Visualizer:
         except Exception:
             pass
 
-    def save(self, img, path):
+    def save(self, img: np.ndarray, path: str) -> bool:
+        """Saves the rendered RGB image to disk as a PNG file.
+
+        Prioritizes OpenCV for writing; falls back to PIL if OpenCV is absent.
+
+        Args:
+            img (np.ndarray): The RGB image to save.
+            path (str): The destination file path.
+
+        Returns:
+            bool: True if the file was saved successfully, False otherwise.
+        """
         try:
             if _HAVE_CV2:
                 cv2.imwrite(path, cv2.cvtColor(img, cv2.COLOR_RGB2BGR))
@@ -130,7 +215,8 @@ class Visualizer:
         except Exception:
             return False
 
-    def close(self):
+    def close(self) -> None:
+        """Destroys any live GUI windows instantiated by the visualizer."""
         if _LIVE and _HAVE_CV2:
             try:
                 cv2.destroyAllWindows()

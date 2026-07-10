@@ -144,6 +144,8 @@ class NavigationController:
         self.blacklist = []            # failed frontier goals (world)
         self.go_fail_until = 0.0
         self.no_frontier_until = 0.0
+        self._no_frontier_strikes = 0  # consecutive starved spin windows (escape escalation)
+        self._escape_until = 0.0       # sim time until which the reactive escape drive runs
         self.cur_v = 0.0
         self.raw_lidar_ranges = None
 
@@ -182,6 +184,10 @@ class NavigationController:
             self._last_raw = raw
         else:
             inc = relative_pose(self._last_raw, raw)
+            if self._is_wheel_slip(inc):
+                inc = (0.0, 0.0, inc[2])  # heading is IMU-sourced (trustworthy);
+                                          # only the encoder-derived translation
+                                          # is dropped -- see _is_wheel_slip.
             self.pose = compose_pose(self.pose, inc)
             self._last_raw = raw
 
@@ -189,6 +195,33 @@ class NavigationController:
             self.raw_lidar_ranges = self.hardware.read_lidar_ranges()
             if self.raw_lidar_ranges is not None:
                 self.scan_body, self.scan_ranges = self.lidar.ranges_to_body(self.raw_lidar_ranges)
+
+    def _is_wheel_slip(self, inc):
+        """True if this tick's encoder-reported translation is almost certainly
+        slip (wheels turning while pinned against an obstacle) rather than real
+        motion, per live lidar clearance in the commanded direction of travel.
+
+        Wheel encoders cannot distinguish "driving forward" from "wheels
+        spinning against a wall" -- they report the same delta either way. The
+        IMU-sourced heading is immune to this (Odometry.update takes yaw
+        straight from the inertial unit), but x/y translation is pure
+        differential-drive dead-reckoning and will happily integrate a phantom
+        few cm/tick forever while wedged. That phantom translation then fools
+        _has_moved_enough() into re-running scan-match + integrate_scan against
+        a predicted pose that never actually advanced, which is what smears/
+        drifts the map during a stuck episode (the log's "map got drifted").
+        This is a single-tick, sensor-grounded check -- much faster than the
+        multi-second _is_stuck()/_is_frozen() watchdogs, which exist to trigger
+        RECOVERY, not to protect the pose belief itself.
+        """
+        dx, dy, _ = inc
+        if math.hypot(dx, dy) < 1e-4 or self.scan_body is None or self.scan_body.shape[0] == 0:
+            return False
+        if self.cur_v > C.SLIP_MIN_CMD_V and LP.front_clearance(self.scan_body, 0.16) < C.SLIP_CLEAR_DIST:
+            return True
+        if self.cur_v < -C.SLIP_MIN_CMD_V and LP.rear_clearance(self.scan_body, 0.18) < C.SLIP_CLEAR_DIST:
+            return True
+        return False
 
     def _has_moved_enough(self):
         """True once the robot has moved/turned enough to re-integrate a scan."""
@@ -288,7 +321,13 @@ class NavigationController:
             # finite (high) cost.  The DWA local planner still uses live lidar
             # for real wall clearance, so safety is preserved.
             cix, ciy = self.occupancy_grid.world_to_grid(self.pose[0], self.pose[1])
-            r = max(3, int(round(0.12 / self.occupancy_grid.res)))  # ~0.12 m, res-independent
+            # Base ~0.12 m disc, widened when the robot has been frontier-starved
+            # for a while -- a false-positive poison/aux ring just past the base
+            # disc can box A* in completely with no escape (see config note on
+            # NO_FRONTIER_MAX_STRIKES).
+            box_m = min(0.12 + self._no_frontier_strikes * C.BOX_CLEAR_STEP_M,
+                       C.BOX_CLEAR_MAX_M)
+            r = max(3, int(round(box_m / self.occupancy_grid.res)))  # res-independent
             n = self.occupancy_grid.n
             x0, x1 = max(0, cix - r), min(n, cix + r + 1)
             y0, y1 = max(0, ciy - r), min(n, ciy + r + 1)
@@ -319,7 +358,10 @@ class NavigationController:
     def select_frontier_goal(self):
         """Pick the best reachable frontier; return (path, goal_world) or (None,None)."""
         self.frontier_mask = FR.detect_frontier_cells(self.occupancy_grid, self.lethal)
-        cands = FR.find_frontiers(self.occupancy_grid, self.lethal, self.pose[:2], self.start_xy)
+        extra_r = min(self._no_frontier_strikes * C.EXPL_RADIUS_RELAX_STEP_M,
+                     C.EXPL_RADIUS_RELAX_MAX_M)
+        cands = FR.find_frontiers(self.occupancy_grid, self.lethal, self.pose[:2],
+                                  self.start_xy, extra_radius=extra_r)
         cands = [c for c in cands if not self._is_blacklisted(c["world"])]
         if not cands:
             return None, None
@@ -404,6 +446,7 @@ class NavigationController:
         if moved > C.STUCK_PROGRESS_MIN_M:
             self._reset_progress(t)
             self.recovery_chain = 0
+            self._no_frontier_strikes = 0
             return False
         return (t - self._progress_ref_t) > C.STUCK_TIMEOUT_S
 
@@ -453,8 +496,18 @@ class NavigationController:
         if (t - self.recovery_t0) < C.RECOVERY_SPIN_T:
             return 0.0, side * C.RECOVERY_SPIN_W
         # done
-        if self.recovery_chain >= C.RECOVERY_MAX_CHAIN and self.goal_world is not None:
-            self.blacklist.append(self.goal_world)   # give up on this goal
+        if self.recovery_chain >= C.RECOVERY_MAX_CHAIN:
+            if self.goal_world is not None:
+                self.blacklist.append(self.goal_world)   # give up on this goal
+            else:
+                # No goal to blacklist means recovery kept firing during a
+                # frontier-starved spin (goal_world is None there) -- the old
+                # code silently did nothing in this case and the spin/recover
+                # loop repeated forever. Jump straight to max escalation so
+                # _explore()'s escape drive fires on the very next tick
+                # instead of waiting out more rescan windows.
+                self._no_frontier_strikes = C.NO_FRONTIER_MAX_STRIKES
+                self._escape_until = t + C.ESCAPE_DRIVE_T
             self.recovery_chain = 0
         self.path = []
         self.goal_world = None
@@ -506,15 +559,40 @@ class NavigationController:
             if path is not None:
                 self.path, self.goal_world = path, goal
                 self._plan_stamp = t
+                self._no_frontier_strikes = 0
             else:
-                # nothing to explore: rescan in place for a while
-                if t < self.no_frontier_until:
-                    return 0.0, C.INIT_SPIN_W
-                self.no_frontier_until = t + C.NO_FRONTIER_SPIN_S
+                # nothing to explore: rescan in place for a while. Escalate
+                # ONCE per rescan window (not every tick -- this branch runs
+                # every tick while starved) so the search radius / anti-boxing
+                # disc widen at a bounded rate instead of jumping to max
+                # instantly (see config.NO_FRONTIER_MAX_STRIKES).
+                if t >= self.no_frontier_until:
+                    self.no_frontier_until = t + C.NO_FRONTIER_SPIN_S
+                    if self._no_frontier_strikes < C.NO_FRONTIER_MAX_STRIKES:
+                        self._no_frontier_strikes += 1
+                    if self._no_frontier_strikes >= C.NO_FRONTIER_MAX_STRIKES:
+                        self._escape_until = t + C.ESCAPE_DRIVE_T
                 self.path, self.goal_world = [], None
+                if t < self._escape_until:
+                    return self._escape_drive()
                 return 0.0, C.INIT_SPIN_W
         v, w, _ = self.drive_along_path(self.path)
         return v, w
+
+    def _escape_drive(self):
+        """Reactive, map-independent escape burst: last resort once frontier
+        search has been starved for C.NO_FRONTIER_MAX_STRIKES rescan windows.
+
+        Drives on LIVE lidar only (front/side clearance), bypassing the mapped
+        costmap/frontier logic that produced the starvation in the first
+        place -- guarantees the robot physically relocates instead of
+        spinning in the same spot forever.
+        """
+        front = LP.front_clearance(self.scan_body, 0.16)
+        side = LP.freer_side(self.scan_body)
+        if front > C.ESCAPE_MIN_FRONT_CLEAR:
+            return C.ESCAPE_DRIVE_V, side * C.ESCAPE_STEER_W * 0.3
+        return 0.0, side * C.ESCAPE_STEER_W
 
     def _last_plan_t(self):
         """Simulation time of the most recent successful plan (or ``-inf``)."""
@@ -708,8 +786,23 @@ class NavigationController:
                 with guarded_stage("perception", self.log, self.events, **ctx):
                     self.update_perception()
             if self.tick % C.DEPTH_AUX_EVERY_TICKS == 0:
+                prev_aux_hits = int(self.occupancy_grid.aux.sum())
                 with guarded_stage("depth_aux", self.log, self.events, **ctx):
                     self._update_depth_aux()
+                new_aux_hits = int(self.occupancy_grid.aux.sum())
+                if new_aux_hits > prev_aux_hits and self.path:
+                    # A floating wall just confirmed (crossed AUX_MIN_HITS)
+                    # while we're committed to a path -- force an immediate A*
+                    # replan through the now-updated, wider-margin costmap
+                    # instead of waiting out REPLAN_PERIOD_S. Without this the
+                    # planner only reacts to a newly-detected floating wall
+                    # once DWA/recovery notices it live, by which point the
+                    # robot may already be grazing it.
+                    self._last_costmap_t = -1e9
+                    self._plan_stamp = -1e9
+                    self.events.event("aux_confirmed_replan", sim_time=t,
+                                      tick=self.tick, state=self.state,
+                                      aux_cells=new_aux_hits)
             with guarded_stage("ir_bumper", self.log, self.events, **ctx):
                 self._update_ir_bumper()
             with guarded_stage("costmap", self.log, self.events, **ctx):

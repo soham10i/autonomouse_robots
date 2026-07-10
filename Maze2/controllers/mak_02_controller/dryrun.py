@@ -21,8 +21,10 @@ from __future__ import annotations
 import math
 import os
 import sys
+from typing import List, Tuple, Dict, Any, Optional
 
 import numpy as np
+import numpy.typing as npt
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -34,13 +36,21 @@ from geometry import inverse_transform_points
 # --------------------------------------------------------------------------- #
 #  Synthetic corridor world (walls as dense point clouds)
 # --------------------------------------------------------------------------- #
-def corridor_walls(centerline, half_width, spacing=0.02):
+def corridor_walls(centerline: List[Tuple[float, float]], half_width: float, spacing: float = 0.02) -> npt.NDArray[np.float64]:
     """World wall points (N,2) for a corridor of ``half_width`` around a polyline.
 
     For each densely-sampled point on the centreline, drop one wall point on
     each side along the local normal.  This approximates the two corridor walls
     (including an L-bend) the way a real lidar would see them, minus occlusion
     -- which is irrelevant for the local planner's nearest-point clearance test.
+    
+    Args:
+        centerline (List[Tuple[float, float]]): The path's centerline coordinates.
+        half_width (float): The lateral distance from the center to each wall.
+        spacing (float, optional): Spacing between sampled points. Defaults to 0.02.
+        
+    Returns:
+        npt.NDArray[np.float64]: Dense point cloud representing the generated corridor walls.
     """
     pts = []
     cl = np.asarray(centerline, dtype=float)
@@ -59,8 +69,16 @@ def corridor_walls(centerline, half_width, spacing=0.02):
     return np.asarray(pts, dtype=float)
 
 
-def polyline_points(polyline, spacing=0.02):
-    """Dense (N,2) points sampled along an explicit wall polyline."""
+def polyline_points(polyline: List[Tuple[float, float]], spacing: float = 0.02) -> npt.NDArray[np.float64]:
+    """Dense (N,2) points sampled along an explicit wall polyline.
+    
+    Args:
+        polyline (List[Tuple[float, float]]): A sequence of vertices for the wall.
+        spacing (float, optional): The uniform spacing distance between points. Defaults to 0.02.
+        
+    Returns:
+        npt.NDArray[np.float64]: The generated array of (x,y) points.
+    """
     pts = []
     pl = np.asarray(polyline, dtype=float)
     for a, b in zip(pl[:-1], pl[1:]):
@@ -72,12 +90,21 @@ def polyline_points(polyline, spacing=0.02):
     return np.asarray(pts, dtype=float)
 
 
-def l_corridor(corner, leg_in, leg_out, half_width):
+def l_corridor(corner: Tuple[float, float], leg_in: float, leg_out: float, half_width: float) -> npt.NDArray[np.float64]:
     """Walls (N,2) for a clean left-turning L-corridor of full width 2*half_width.
 
     Built as two MITERED wall polylines (inner + outer) so the convex inner
     corner is a single point, not the self-intersecting notch a per-segment
     normal offset produces.  Travels +x into ``corner`` then +y out of it.
+    
+    Args:
+        corner (Tuple[float, float]): The (x,y) turn junction point.
+        leg_in (float): Length of the incoming segment along +x.
+        leg_out (float): Length of the outgoing segment along +y.
+        half_width (float): Distance from centerline to the walls.
+        
+    Returns:
+        npt.NDArray[np.float64]: Points sampling the L-corridor.
     """
     cx, cy = corner
     hw = half_width
@@ -89,8 +116,17 @@ def l_corridor(corner, leg_in, leg_out, half_width):
 # --------------------------------------------------------------------------- #
 #  Geometry helper
 # --------------------------------------------------------------------------- #
-def dist_to_polyline(px, py, poly):
-    """Perpendicular distance from (px,py) to a polyline (the path centreline)."""
+def dist_to_polyline(px: float, py: float, poly: List[Tuple[float, float]]) -> float:
+    """Perpendicular distance from (px,py) to a polyline (the path centreline).
+    
+    Args:
+        px (float): X coordinate of the point.
+        py (float): Y coordinate of the point.
+        poly (List[Tuple[float, float]]): Sequence of coordinates forming the polyline.
+        
+    Returns:
+        float: Shortest orthogonal distance to any segment on the polyline.
+    """
     best = float("inf")
     for a, b in zip(poly[:-1], poly[1:]):
         ax, ay = a
@@ -106,8 +142,21 @@ def dist_to_polyline(px, py, poly):
 # --------------------------------------------------------------------------- #
 #  One closed-loop episode
 # --------------------------------------------------------------------------- #
-def simulate(name, start_pose, path_world, walls, *, max_ticks=900,
-             goal_tol=0.22, v_cap=None):
+def simulate(name: str, start_pose: Tuple[float, float, float], path_world: List[Tuple[float, float]], walls: npt.NDArray[np.float64], *, max_ticks: int = 900, goal_tol: float = 0.22, v_cap: Optional[float] = None) -> Dict[str, Any]:
+    """Runs a single orchestration episode for the DWA loop over provided geometry.
+    
+    Args:
+        name (str): Label for this test scenario.
+        start_pose (Tuple[float, float, float]): (x, y, theta) start.
+        path_world (List[Tuple[float, float]]): The A* style global path to follow.
+        walls (npt.NDArray[np.float64]): Full world geometry points simulating lidar.
+        max_ticks (int, optional): Maximum iteration steps. Defaults to 900.
+        goal_tol (float, optional): Goal reach threshold. Defaults to 0.22.
+        v_cap (Optional[float], optional): Top speed limit. Defaults to None.
+        
+    Returns:
+        Dict[str, Any]: Metrics and final outcomes summarizing the run.
+    """
     dt = 0.032
     dwa = LP.DWAPlanner(ctrl_dt=dt)
     x, y, th = start_pose
@@ -116,7 +165,7 @@ def simulate(name, start_pose, path_world, walls, *, max_ticks=900,
     dist_travelled = 0.0
     min_clear = float("inf")
     max_dev = 0.0
-    v_hist = []
+    v_hist: List[float] = []
     reached = False
     ticks = 0
 
@@ -162,18 +211,19 @@ def simulate(name, start_pose, path_world, walls, *, max_ticks=900,
 # --------------------------------------------------------------------------- #
 #  Scenarios + assertions
 # --------------------------------------------------------------------------- #
-def _report(r):
+def _report(r: Dict[str, Any]) -> None:
     print(f"  [{r['name']}] reached={r['reached']} "
           f"dist={r['dist']:.2f}m avg_v={r['avg_speed']:.3f}m/s "
           f"min_clear={r['min_clear']:.3f}m max_dev={r['max_dev']:.3f}m "
           f"t={r['elapsed']:.1f}s goal_err={r['final_dist_to_goal']:.2f}m")
 
 
-def main():
+def main() -> None:
+    """Executes the DWA test scenarios and exits with 1 if any assertions fail."""
     print("mak_02 Maze2 closed-loop dry-run (carrot + DWA)")
     fails = []
 
-    def check(name, cond):
+    def check(name: str, cond: bool) -> None:
         print(f"    [{'PASS' if cond else 'FAIL'}] {name}")
         if not cond:
             fails.append(name)
@@ -186,8 +236,8 @@ def main():
     _report(r)
     check("straight-wide reaches the goal", r["reached"])
     # the regression that pins the crawl bug: real cruising speed, not cm/s
-    check("straight-wide cruises (avg_v > 0.20 m/s)", r["avg_speed"] > 0.20)
-    check("straight-wide never clips a wall (min_clear > 0.10 m)", r["min_clear"] > 0.10)
+    check("straight-wide cruises (avg_v > 0.20 m/s)", float(r["avg_speed"]) > 0.20)
+    check("straight-wide never clips a wall (min_clear > 0.10 m)", float(r["min_clear"]) > 0.10)
 
     # ---- Scenario 2: the REAL Maze4 bottleneck — 0.388 m gap to BLUE ---------
     # half_width 0.194 == ground-truth tightest clearance; robot half-width 0.116
@@ -196,15 +246,15 @@ def main():
     r = simulate("real-gap-0.388", (0.0, 0.0, 0.0), path, walls_n)
     _report(r)
     check("real-gap reaches the goal", r["reached"])
-    check("real-gap still moves (avg_v > 0.12 m/s, no crawl)", r["avg_speed"] > 0.12)
-    check("real-gap stays centred (max_dev < 0.06 m)", r["max_dev"] < 0.06)
-    check("real-gap never clips a wall (min_clear > 0.116 m)", r["min_clear"] > 0.116)
+    check("real-gap still moves (avg_v > 0.12 m/s, no crawl)", float(r["avg_speed"]) > 0.12)
+    check("real-gap stays centred (max_dev < 0.06 m)", float(r["max_dev"]) < 0.06)
+    check("real-gap never clips a wall (min_clear > 0.116 m)", float(r["min_clear"]) > 0.116)
 
     # ---- Scenario 2b: start 0.05 m off-centre — must recover to centreline ----
     r = simulate("real-gap-offset", (0.0, 0.06, 0.0), path, walls_n)
     _report(r)
     check("off-centre start recovers and reaches goal", r["reached"])
-    check("off-centre start never clips a wall (min_clear > 0.112 m)", r["min_clear"] > 0.112)
+    check("off-centre start never clips a wall (min_clear > 0.112 m)", float(r["min_clear"]) > 0.112)
 
     # ---- Scenario 3: L-corner corridor (tests pivot + turn-through) ----------
     # corner at (2.4, 0); robot enters along +x, exits along +y.
@@ -213,8 +263,8 @@ def main():
     r = simulate("corner", (0.0, 0.0, 0.0), path_L, walls_L, max_ticks=1600)
     _report(r)
     check("corner reaches the goal around the bend", r["reached"])
-    check("corner makes real progress (dist > 3.5 m)", r["dist"] > 3.5)
-    check("corner never clips a wall (min_clear > 0.09 m)", r["min_clear"] > 0.09)
+    check("corner makes real progress (dist > 3.5 m)", float(r["dist"]) > 3.5)
+    check("corner never clips a wall (min_clear > 0.09 m)", float(r["min_clear"]) > 0.09)
 
     # ---- Scenario 4: must turn from a 90deg-off start (pivot gate) -----------
     r = simulate("pivot-start", (0.0, 0.0, math.pi / 2), path, walls)
