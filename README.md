@@ -31,20 +31,20 @@ applicable, `dryrun.py`) — the regression gate used throughout the cleanup.
 
 **Maze 3 Test Run:**
 
-<video src="Maze3/Maze3%20simulation%20video.mp4" controls="controls" style="max-width: 100%;">
-  Your browser does not support the video tag. You can <a href="Maze3/Maze3%20simulation%20video.mp4">download the video here</a>.
+<video src="https://github.com/soham10i/autonomouse_robots/raw/main/Maze3/Maze3_simulation_video.mp4" controls="controls" style="max-width: 100%;">
+  Your browser does not support the video tag. You can <a href="https://github.com/soham10i/autonomouse_robots/raw/main/Maze3/Maze3_simulation_video.mp4">download the video here</a>.
 </video>
 
 **Maze 4 Test Run:**
 
-<video src="Maze4/Maze4%20simulation%20video.mp4" controls="controls" style="max-width: 100%;">
-  Your browser does not support the video tag. You can <a href="Maze4/Maze4%20simulation%20video.mp4">download the video here</a>.
+<video src="https://github.com/soham10i/autonomouse_robots/raw/main/Maze4/Maze4_simulation_video.mp4" controls="controls" style="max-width: 100%;">
+  Your browser does not support the video tag. You can <a href="https://github.com/soham10i/autonomouse_robots/raw/main/Maze4/Maze4_simulation_video.mp4">download the video here</a>.
 </video>
 
 **Maze 5 Test Run:**
 
-<video src="Maze5/Maze5%20simulation%20video.mp4" controls="controls" style="max-width: 100%;">
-  Your browser does not support the video tag. You can <a href="Maze5/Maze5%20simulation%20video.mp4">download the video here</a>.
+<video src="https://github.com/soham10i/autonomouse_robots/raw/main/Maze5/Maze5_simulation_video.mp4" controls="controls" style="max-width: 100%;">
+  Your browser does not support the video tag. You can <a href="https://github.com/soham10i/autonomouse_robots/raw/main/Maze5/Maze5_simulation_video.mp4">download the video here</a>.
 </video>
 
 ### `common/` — shared wrapper & observability (outside every maze)
